@@ -1,7 +1,7 @@
 //! Discover a project's checkouts and associate local Git and agent state.
 
 use crate::client::{self, HerdrClient};
-use crate::model::{AgentHere, GitFacts, Project, Worktree};
+use crate::model::{AgentHere, BaseDiff, GitFacts, Project, Space, Tab, Worktree};
 use crate::pyjson::{self, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -185,7 +185,43 @@ pub fn agents(client: &mut HerdrClient) -> Vec<AgentHere> {
             status: status.to_owned(),
             cwd: text(row.get("foreground_cwd")).or_else(|| text(row.get("cwd"))).unwrap_or("").to_owned(),
             pane_id: text(row.get("pane_id")).unwrap_or("").to_owned(),
+            tab_id: text(row.get("tab_id")).unwrap_or("").to_owned(),
         }
+    }).collect()
+}
+
+/// Every open workspace that shows a checkout, with its tabs; None when the
+/// server could not be asked, so callers keep what they knew.
+pub fn spaces(client: &mut HerdrClient) -> Option<Vec<Space>> {
+    let workspaces = client.call("workspace.list", client::dict(&[]), &["workspace", "list"]).ok()?;
+    let tabs = client.call("tab.list", client::dict(&[]), &["tab", "list"]).ok();
+    let tabs = tabs.as_ref().and_then(|result| result.get("tabs")).map(Value::list_or_empty).unwrap_or_default();
+    Some(workspaces.get("workspaces").map(Value::list_or_empty).unwrap_or_default().iter().filter_map(|row| {
+        let id = text(row.get("workspace_id"))?;
+        let checkout = text(row.get("worktree").get("checkout_path"))?;
+        Some(Space {
+            id: id.to_owned(),
+            label: text(row.get("label")).unwrap_or(id).to_owned(),
+            checkout: checkout.to_owned(),
+            tabs: tabs.iter().filter(|tab| tab.get("workspace_id").as_str() == Some(id)).filter_map(|tab| {
+                let tab_id = text(tab.get("tab_id"))?;
+                Some(Tab {
+                    id: tab_id.to_owned(),
+                    label: text(tab.get("label")).unwrap_or(tab_id).to_owned(),
+                    focused: tab.get("focused").truthy(),
+                })
+            }).collect(),
+        })
+    }).collect())
+}
+
+/// Each worktree's space: the workspace herdr reported for it at load, else
+/// one opened on the same checkout since.
+pub fn spaces_by_worktree(worktrees: &[Worktree], spaces: &[Space]) -> Vec<Option<Space>> {
+    worktrees.iter().map(|worktree| {
+        spaces.iter().find(|space| worktree.open_workspace_id.as_deref() == Some(space.id.as_str()))
+            .or_else(|| spaces.iter().find(|space| Path::new(&space.checkout) == Path::new(&worktree.path)))
+            .cloned()
     }).collect()
 }
 
@@ -232,8 +268,34 @@ fn parse_status(output: &[u8]) -> GitFacts {
     facts
 }
 
+/// The branch against `default_branch` (its fetched remote copy when there is
+/// one): commit counts both ways and a numstat since the merge base.
+fn base_diff(path: &str, default_branch: &str) -> Option<BaseDiff> {
+    let remote = format!("origin/{default_branch}");
+    let base = if git(path, &["rev-parse", "--verify", "--quiet", &format!("refs/remotes/{remote}")]).is_some() { remote } else { default_branch.to_owned() };
+    let counts = git(path, &["rev-list", "--left-right", "--count", &format!("{base}...HEAD")])?;
+    let counts = String::from_utf8_lossy(&counts);
+    let (behind, ahead) = counts.trim().split_once('\t')?;
+    let numstat = git(path, &["diff", "--numstat", "--no-renames", &format!("{base}...HEAD")])?;
+    Some(BaseDiff {
+        ahead: ahead.parse().ok()?,
+        behind: behind.parse().ok()?,
+        files: parse_numstat(&String::from_utf8_lossy(&numstat)),
+        base,
+    })
+}
+
+fn parse_numstat(text: &str) -> Vec<(String, Option<u32>, Option<u32>)> {
+    text.lines().filter_map(|line| {
+        let mut fields = line.splitn(3, '\t');
+        let (added, deleted, path) = (fields.next()?, fields.next()?, fields.next()?);
+        Some((path.to_owned(), added.parse().ok(), deleted.parse().ok()))
+    }).collect()
+}
+
 /// Blocking local detail collection; callers run this away from the UI thread.
-pub fn git_facts(path: &str) -> GitFacts {
+/// `base` is the default branch; the default branch itself has no base diff.
+pub fn git_facts(path: &str, base: Option<&str>) -> GitFacts {
     let Some(status) = git(path, &["status", "--porcelain=v2", "--branch", "-z", "--untracked-files=normal"]) else {
         return GitFacts::default();
     };
@@ -245,6 +307,7 @@ pub fn git_facts(path: &str) -> GitFacts {
             facts.recent_commits.push(commit.to_owned());
         }
     }
+    facts.base = base.and_then(|base| base_diff(path, base));
     facts
 }
 
@@ -322,6 +385,43 @@ mod tests {
         assert_eq!(facts.behind, None);
         assert_eq!(parse_status(b"# branch.ab +0 -0\0").ahead, Some(0));
         assert_eq!(parse_status(b"").dirty, Some(0));
+    }
+
+    #[test]
+    fn base_diff_counts_both_ways_and_lists_files() {
+        let _guard = crate::testutil::env_lock();
+        let temp = crate::testutil::TempDir::new();
+        let repo = temp.path().to_str().unwrap();
+        let git = |args: &[&str]| assert!(std::process::Command::new("git").args(["-c", "user.name=t", "-c", "user.email=t@t", "-C", repo]).args(args).status().unwrap().success());
+        git(&["init", "-q", "-b", "main"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "init"]);
+        git(&["switch", "-q", "-c", "feat"]);
+        std::fs::write(temp.path().join("a.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(temp.path().join("b.bin"), [0u8, 1, 2]).unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "work"]);
+        git(&["switch", "-q", "main"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "elsewhere"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "and again"]);
+        git(&["switch", "-q", "feat"]);
+        let diff = base_diff(repo, "main").unwrap();
+        assert_eq!((diff.base.as_str(), diff.ahead, diff.behind), ("main", 1, 2));
+        assert_eq!(diff.files, [("a.txt".to_string(), Some(2), Some(0)), ("b.bin".to_string(), None, None)]);
+        assert!(base_diff(repo, "no-such-branch").is_none());
+        assert_eq!(git_facts(repo, Some("main")).base, Some(diff));
+    }
+
+    #[test]
+    fn spaces_match_by_workspace_id_then_checkout() {
+        let worktrees = [
+            Worktree { path: "/a/app".into(), open_workspace_id: Some("w1".into()), ..Worktree::default() },
+            Worktree { path: "/a/app/.worktrees/x".into(), ..Worktree::default() },
+            Worktree { path: "/a/app/.worktrees/y".into(), open_workspace_id: Some("gone".into()), ..Worktree::default() },
+        ];
+        let space = |id: &str, checkout: &str| Space { id: id.into(), label: id.into(), checkout: checkout.into(), tabs: Vec::new() };
+        let spaces = [space("w1", "/elsewhere"), space("w2", "/a/app/.worktrees/x")];
+        let matched: Vec<_> = spaces_by_worktree(&worktrees, &spaces).into_iter().map(|s| s.map(|s| s.id)).collect();
+        assert_eq!(matched, [Some("w1".into()), Some("w2".into()), None]);
     }
 
     #[test]

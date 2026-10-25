@@ -67,6 +67,11 @@ UI conventions and its attribution rather than introducing a second input/layout
   passed filename in `presets::open_editor`. The agent shell has `EDITOR=true`; for live
   editor tests, explicitly choose a real editor or a deterministic editing script
   (and account for `VISUAL` taking precedence).
+- Cleanup (`session::remove_worktree`): herdr's `worktree.remove` needs the space's
+  `workspace_id`, closes it, keeps the branch and refuses dirty checkouts; a worktree
+  with no space goes through `git worktree remove`. Never pass `force`. Delete the branch
+  only when the merged PR's `headRefOid` equals the local head. Herdr will not close a
+  main checkout's space while linked worktree spaces are grouped under it.
 - Use disposable repositories for mutating tests; never run them against a real project.
 
 ## Live verification

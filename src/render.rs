@@ -69,6 +69,10 @@ pub struct Item {
     /// Agent kind whose logo leads the row, when icons are on.
     pub agent: Option<String>,
     pub meta: Vec<Meta>,
+    /// Tree depth: worktrees 0, their space 1, its tabs 2.
+    pub indent: usize,
+    /// Glyph (role, text) after the indent: which level of the tree this is.
+    pub icon: Option<(&'static str, &'static str)>,
     /// Search fields, prepared: field 0 is the title; the others are searched
     /// but drawn only where the detail names them.
     pub prepared: Vec<Prepared>,
@@ -79,7 +83,13 @@ impl Item {
         fields.insert(0, title.clone());
         let detail_field = if detail.is_empty() { -1 } else { fields.iter().position(|f| *f == detail).map(|i| i as isize).unwrap_or(-1) };
         let prepared = fields.iter().map(|f| Prepared::new(f)).collect();
-        Item { title, detail, detail_field, status, agent, meta, prepared }
+        Item { title, detail, detail_field, status, agent, meta, indent: 0, icon: None, prepared }
+    }
+
+    pub fn tree(mut self, indent: usize, icon: Option<(&'static str, &'static str)>) -> Item {
+        self.indent = indent;
+        self.icon = icon;
+        self
     }
 }
 
@@ -271,6 +281,12 @@ pub fn render_row(theme: &Theme, item: &Item, row: &Row, width: isize, selected:
         .then(|| Segment::new(glyph_role, format!("{} ", crate::theme::status_glyph(&item.status))));
     let logo = if theme.agent_icons { icons::logo_for(item.agent.as_deref()) } else { None };
     let mut leading = vec![marker];
+    if item.indent > 0 {
+        leading.push(Segment::new("unknown", "  ".repeat(item.indent)));
+    }
+    if let Some((role, icon)) = item.icon {
+        leading.push(Segment::new(role, format!("{} ", icon)));
+    }
     if let Some(logo) = logo {
         leading.push(Segment::new(agent_role(item.agent.as_deref()), format!("{}  ", logo)));
     }

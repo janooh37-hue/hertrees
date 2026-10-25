@@ -115,6 +115,8 @@ pub fn parse_value(value: &Value) -> Option<String> {
 pub struct Theme {
     fg: HashMap<String, String>,
     pub agent_icons: bool,
+    /// Worktree/space/tab glyphs; None draws the tree without them.
+    pub tree_icons: Option<crate::icons::TreeIcons>,
     pub selection_bg: String,
 }
 
@@ -148,6 +150,7 @@ impl Theme {
         Theme {
             fg,
             agent_icons: false,
+            tree_icons: None,
             selection_bg: selection.map(|p| format!("\x1b[48;{}m", p)).unwrap_or_default(),
         }
     }

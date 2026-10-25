@@ -3,7 +3,7 @@
 //! Read from `$HERDR_PLUGIN_CONFIG_DIR/config.json`. Unknown keys are ignored,
 //! and a broken file falls back to defaults instead of taking the picker down.
 //! The display keys (`preview`, `mouse`, `agent_icons`, `refresh_ms`, `colors`,
-//! `selection_background`, `wordmark`) are documented in the README.
+//! `selection_background`, `wordmark`, `icons`) are documented in the README.
 
 use crate::pyjson::{self, Map, Value};
 use crate::pystr;
@@ -51,6 +51,8 @@ pub struct Config {
     pub scope: &'static str,
     /// Where and how the name is drawn; unknown values give the default.
     pub wordmark: Style,
+    /// Glyphs for worktree, space and tab rows: one of `icons::TREE_MODES`.
+    pub icons: &'static str,
 }
 
 /// Python's `int(value)` for whatever JSON put there; None where it raises.
@@ -115,6 +117,10 @@ impl Config {
                 .and_then(|v| v.as_str())
                 .and_then(|name| Style::parse(&pystr::lower(pystr::strip(name))))
                 .unwrap_or(Style::Search),
+            icons: get("icons")
+                .and_then(|v| v.as_str())
+                .and_then(|name| crate::icons::TREE_MODES.iter().copied().find(|mode| *mode == pystr::lower(pystr::strip(name))))
+                .unwrap_or("auto"),
         }
     }
 

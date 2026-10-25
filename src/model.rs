@@ -55,6 +55,27 @@ pub struct AgentHere {
     pub status: String,
     pub cwd: String,
     pub pane_id: String,
+    /// The tab holding the agent's pane; empty when herdr did not say.
+    pub tab_id: String,
+}
+
+/// The Herdr workspace showing a worktree: one per checkout, named by the user
+/// or after the branch.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Space {
+    pub id: String,
+    pub label: String,
+    /// Checkout the workspace was opened on; matches `Worktree::path`.
+    pub checkout: String,
+    pub tabs: Vec<Tab>,
+}
+
+/// One tab of a space, in herdr's order. Labels are usually set by the bar.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Tab {
+    pub id: String,
+    pub label: String,
+    pub focused: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -78,6 +99,8 @@ pub struct PullRequest {
     /// Merged, Open, Draft or Closed; never None/Unknown.
     pub state: PrState,
     pub head_ref: String,
+    /// Commit the PR's head pointed at last; empty when not known.
+    pub head_oid: String,
     /// Login of the head repository owner; empty when GitHub no longer knows it.
     pub head_owner: String,
     pub base_ref: String,
@@ -114,4 +137,20 @@ pub struct GitFacts {
     pub last_commit_epoch: Option<i64>,
     /// Up to five most recent commits: "abc1234 subject".
     pub recent_commits: Vec<String>,
+    /// What the branch changed against its base, when it has one.
+    pub base: Option<BaseDiff>,
+}
+
+/// A branch against the default branch it will merge into: what the preview's
+/// diff shows. Unlike the upstream counts, this is the work itself.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BaseDiff {
+    /// The ref compared with: `origin/main` when fetched, else `main`.
+    pub base: String,
+    /// Commits on the branch the base lacks, and the reverse.
+    pub ahead: u32,
+    pub behind: u32,
+    /// Changed files since the merge base: (path, added, deleted); binary
+    /// files have no line counts.
+    pub files: Vec<(String, Option<u32>, Option<u32>)>,
 }
