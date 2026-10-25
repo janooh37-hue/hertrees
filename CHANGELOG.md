@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.1 (2026-10-25)
+
+- New worktrees are created under the project's `.worktrees/` directory.
+- `hertrees --version` shows the pixel mark on a terminal; piped output is unchanged.
+- The popup's "not a git project" and "no worktrees" states show the mark when there is room.
+- Brand assets and usage guide in `branding/`; README rewritten with a demo GIF and quick start.
+- Standalone project: herdr-bar is credited for the original UI layer, with no runtime dependency.
+
 ## 0.2.0 (2026-10-25)
 
 - Presets are user-owned Markdown files in `<config_dir>/presets/<name>.md`, seeded
