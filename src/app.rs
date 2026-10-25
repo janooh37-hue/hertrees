@@ -2759,6 +2759,23 @@ mod tests {
         assert_eq!(edit.text, "draft");
     }
 
+    /// Stand-in `claude` and `codex` on an isolated PATH: leaving the editor
+    /// rebuilds the agent list from what is installed.
+    fn fake_agents(tmp: &Path, env: &mut EnvVars) {
+        let bin = tmp.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        for name in ["claude", "codex"] {
+            let executable = bin.join(name);
+            std::fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        env.set("PATH", &bin);
+    }
+
     fn select_preset(picker: &mut Picker, name: &str) {
         let index = picker.presets.iter().position(|preset| preset.name == name).unwrap();
         if let Mode::Agent { preset, .. } = &mut picker.mode {
@@ -2772,6 +2789,7 @@ mod tests {
         let tmp = TempDir::new();
         let mut env = EnvVars::new();
         env.set("HERDR_PLUGIN_STATE_DIR", tmp.path().join("state"));
+        fake_agents(tmp.path(), &mut env);
         let mut picker = preset_picker(tmp.path(), &mut env);
         select_preset(&mut picker, "plan");
         key(&mut picker, "ctrl+o");
@@ -2800,6 +2818,7 @@ mod tests {
         std::fs::write(dir.join("rules.md"), "---\nask: true\n---\nFollow the rules.").unwrap();
         std::fs::write(dir.join("wrap.md"), "Task: {input}").unwrap();
         std::fs::write(dir.join("ticket.md"), "Fix {ticket} for {owner}.").unwrap();
+        fake_agents(tmp.path(), &mut env);
         let mut picker = preset_picker(tmp.path(), &mut env);
         for name in ["rules", "wrap"] {
             select_preset(&mut picker, name);
