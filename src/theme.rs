@@ -156,6 +156,11 @@ impl Theme {
         self.fg.get(role).map(|s| s.as_str()).unwrap_or("")
     }
 
+    /// The background code for a role's colour; empty where the role has none.
+    pub fn bg(&self, role: &str) -> String {
+        self.fg(role).replacen("\x1b[38;", "\x1b[48;", 1)
+    }
+
     pub fn paint(&self, role: &str, text: &str) -> String {
         self.paint_bold(role, text, false)
     }

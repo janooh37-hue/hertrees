@@ -29,6 +29,7 @@ mod testutil;
 mod textutil;
 mod theme;
 mod unicode_tables;
+mod wordmark;
 
 fn main() {
     let args: Vec<String> = std::env::args_os().skip(1).map(|a| a.to_string_lossy().into_owned()).collect();

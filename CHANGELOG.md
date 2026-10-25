@@ -5,6 +5,13 @@
 - The search line carries the wordmark: `❯ hertrees │ search worktrees…`, "her" in the
   text colour and "trees" in the idle (leaf) colour, so colour overrides apply. Popups
   narrower than 60 columns keep the plain prompt.
+- New `wordmark` config key picks the name's style: `search` (the default above),
+  `pixel`, `pixel-small`, `braille`, `sextant` or `icon` (brand pixel lettering, or the
+  icon with name, tagline and counts, drawn in the popup's first rows above a plain search
+  line), or `off`. Pixel styles fall back to `search` when the popup is too narrow for the
+  art or the list would keep fewer than 5 rows. `sextant` needs a font with Unicode 13
+  sextants. Herdr 0.9.3 has no way to set a plugin pane's border title, so there are no
+  border-title styles.
 
 ## 0.2.2 (2026-10-25)
 

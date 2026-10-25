@@ -102,10 +102,11 @@ pub struct Layout {
     pub preview_width: isize,
 }
 
-pub fn compute_layout(width: isize, height: isize, preview: bool) -> Layout {
+/// `header` rows (a pixel wordmark) sit above the input line and push the list down.
+pub fn compute_layout(width: isize, height: isize, preview: bool, header: isize) -> Layout {
     let rules = height >= 8;
     let footer = height >= 6;
-    let list_top = if rules { 2 } else { 1 };
+    let list_top = header + if rules { 2 } else { 1 };
     let chrome = list_top + if rules && footer { 2 } else if footer { 1 } else { 0 };
     let list_height = (height - chrome).max(1);
     let inner = (width - 2).max(1);
@@ -379,9 +380,10 @@ const WORDMARK_LABEL: [(&str, &str); 3] = [("text", "her"), ("idle", "trees"), (
 /// and the scope chip keep their room.
 pub const WORDMARK_MIN_WIDTH: isize = 60;
 
-/// The main picker's query line: `❯ hertrees │ query…` when wide enough, the
-/// plain prompt otherwise. The query, its cursor and the placeholder start
-/// after the separator.
+/// The main picker's query line: `❯ hertrees │ query…` when `label` is set and
+/// the line is wide enough, the plain prompt otherwise. The query, its cursor
+/// and the placeholder start after the separator.
+#[allow(clippy::too_many_arguments)]
 pub fn render_search(
     theme: &Theme,
     query: &str,
@@ -390,9 +392,10 @@ pub fn render_search(
     placeholder: &str,
     short_placeholder: &str,
     chip: &str,
+    label: bool,
 ) -> String {
     let mut prompt = vec![Segment::bold("accent", format!("{} ", PROMPT), true)];
-    if width >= WORDMARK_MIN_WIDTH {
+    if label && width >= WORDMARK_MIN_WIDTH {
         prompt.extend(WORDMARK_LABEL.iter().map(|(role, text)| Segment::bold(role, *text, *role != "unknown")));
     }
     // The full placeholder needs 62 columns counting the bare prompt.
@@ -693,7 +696,7 @@ mod tests {
     #[test]
     fn search_line_carries_the_two_tone_wordmark_when_wide() {
         let theme = Theme::new(None, None, None);
-        let line = render_search(&theme, "", 0, 100, WIDE, SHORT, "everything");
+        let line = render_search(&theme, "", 0, 100, WIDE, SHORT, "everything", true);
         let plain = strip_ansi(&line);
         assert!(plain.starts_with("❯ hertrees │  search worktrees, branches, PRs…    @ agents"), "{plain:?}");
         assert!(plain.ends_with(" everything "));
@@ -703,7 +706,7 @@ mod tests {
         assert!(line.contains(&format!("{}trees{}", theme.fg("idle"), RESET)));
         assert!(line.contains(&format!("{} │ {}", theme.fg("unknown"), RESET)));
         // Between the full placeholder's width and the label's, the short one.
-        let mid = strip_ansi(&render_search(&theme, "", 0, 66, WIDE, SHORT, "everything"));
+        let mid = strip_ansi(&render_search(&theme, "", 0, 66, WIDE, SHORT, "everything", true));
         assert!(mid.starts_with("❯ hertrees │  search worktrees, branches, PRs…  "), "{mid:?}");
         assert!(!mid.contains("@ agents") && mid.ends_with(" everything "));
     }
@@ -711,33 +714,41 @@ mod tests {
     #[test]
     fn search_line_drops_the_wordmark_when_narrow() {
         let theme = Theme::new(None, None, None);
-        let narrow = render_search(&theme, "", 0, WORDMARK_MIN_WIDTH - 1, WIDE, SHORT, "everything");
+        let narrow = render_search(&theme, "", 0, WORDMARK_MIN_WIDTH - 1, WIDE, SHORT, "everything", true);
         assert_eq!(strip_ansi(&narrow), strip_ansi(&render_input(&theme, "", 0, WORDMARK_MIN_WIDTH - 1, SHORT, "everything", PROMPT)));
         assert!(!strip_ansi(&narrow).contains("hertrees"));
         for width in [WORDMARK_MIN_WIDTH, WORDMARK_MIN_WIDTH + 1] {
-            let text = strip_ansi(&render_search(&theme, "", 0, width, WIDE, SHORT, "everything"));
+            let text = strip_ansi(&render_search(&theme, "", 0, width, WIDE, SHORT, "everything", true));
             assert!(text.starts_with("❯ hertrees │ "), "{text:?}");
             assert!(text.contains("search worktrees") && text.ends_with(" everything "), "{text:?}");
             assert_eq!(display_width(&text) as isize, width);
         }
         for width in [1, 10, 30, 59, 60, 61, 72, 73, 140] {
-            assert!(visible_width(&render_search(&theme, "feat 界", 3, width, WIDE, SHORT, "✓ merged")) as isize <= width.max(14));
+            assert!(visible_width(&render_search(&theme, "feat 界", 3, width, WIDE, SHORT, "✓ merged", true)) as isize <= width.max(14));
         }
+    }
+
+    #[test]
+    fn search_line_without_its_label_is_the_plain_prompt() {
+        let theme = Theme::new(None, None, None);
+        let plain = render_search(&theme, "", 0, 100, WIDE, SHORT, "everything", false);
+        assert_eq!(strip_ansi(&plain), strip_ansi(&render_input(&theme, "", 0, 100, WIDE, "everything", PROMPT)));
+        assert!(!strip_ansi(&plain).contains("hertrees"));
     }
 
     #[test]
     fn search_cursor_sits_in_the_query_after_the_separator() {
         let theme = Theme::new(None, None, None);
-        let line = render_search(&theme, "feat", 2, 80, WIDE, SHORT, "");
+        let line = render_search(&theme, "feat", 2, 80, WIDE, SHORT, "", true);
         let (before, after) = line.split_once("\x1b[7m").expect("an inverse cursor");
         assert_eq!(strip_ansi(before), "❯ hertrees │ fe");
         assert!(after.starts_with("a\x1b[27m"));
         assert_eq!(strip_ansi(&line), "❯ hertrees │ feat");
         // At the end, the cursor is a blank cell after the query.
-        let end = render_search(&theme, "feat", 4, 80, WIDE, SHORT, "");
+        let end = render_search(&theme, "feat", 4, 80, WIDE, SHORT, "", true);
         assert_eq!(strip_ansi(end.split_once("\x1b[7m").unwrap().0), "❯ hertrees │ feat");
         // Narrow: the query follows the bare prompt.
-        let narrow = render_search(&theme, "feat", 0, 40, WIDE, SHORT, "");
+        let narrow = render_search(&theme, "feat", 0, 40, WIDE, SHORT, "", true);
         assert_eq!(strip_ansi(narrow.split_once("\x1b[7m").unwrap().0), "❯ ");
     }
 

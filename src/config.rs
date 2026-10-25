@@ -3,10 +3,11 @@
 //! Read from `$HERDR_PLUGIN_CONFIG_DIR/config.json`. Unknown keys are ignored,
 //! and a broken file falls back to defaults instead of taking the picker down.
 //! The display keys (`preview`, `mouse`, `agent_icons`, `refresh_ms`, `colors`,
-//! `selection_background`) are documented in the README.
+//! `selection_background`, `wordmark`) are documented in the README.
 
 use crate::pyjson::{self, Map, Value};
 use crate::pystr;
+use crate::wordmark::Style;
 use std::path::PathBuf;
 
 pub const SCOPES: &[&str] = &["all", "nopr", "open", "draft", "merged", "closed", "agents"];
@@ -48,6 +49,8 @@ pub struct Config {
     pub pr_cache_ttl_s: i64,
     /// The filter the picker opens with: one of `SCOPES`.
     pub scope: &'static str,
+    /// Where and how the name is drawn; unknown values give the default.
+    pub wordmark: Style,
 }
 
 /// Python's `int(value)` for whatever JSON put there; None where it raises.
@@ -108,6 +111,10 @@ impl Config {
                 .and_then(|v| v.as_str())
                 .and_then(|name| SCOPES.iter().copied().find(|scope| *scope == name))
                 .unwrap_or("all"),
+            wordmark: get("wordmark")
+                .and_then(|v| v.as_str())
+                .and_then(|name| Style::parse(&pystr::lower(pystr::strip(name))))
+                .unwrap_or(Style::Search),
         }
     }
 
@@ -182,5 +189,21 @@ mod tests {
         assert_eq!(config.default_agent.as_deref(), Some("omp"));
         assert_eq!(config.scope, "merged");
         assert_eq!(with(r#"{"scope": "Merged"}"#).scope, "all");
+    }
+
+    #[test]
+    fn wordmark_accepts_each_style_and_defaults_to_the_search_line() {
+        let cases = [
+            ("search", Style::Search), ("pixel", Style::Pixel), ("pixel-small", Style::PixelSmall),
+            ("braille", Style::Braille), ("sextant", Style::Sextant), ("icon", Style::Icon), ("off", Style::Off),
+            (" Pixel ", Style::Pixel),
+        ];
+        for (name, style) in cases {
+            assert_eq!(with(&format!(r#"{{"wordmark": "{}"}}"#, name)).wordmark, style, "{name}");
+        }
+        assert_eq!(Config::default().wordmark, Style::Search);
+        for json in [r#"{"wordmark": "border"}"#, r#"{"wordmark": ""}"#, r#"{"wordmark": 3}"#, r#"{"wordmark": null}"#] {
+            assert_eq!(with(json).wordmark, Style::Search, "{json}");
+        }
     }
 }

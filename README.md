@@ -82,6 +82,8 @@ Everything is optional. Edit `~/.config/herdr/plugins/config/hertrees/config.jso
 ```
 
 - `agents`: agent kinds offered, in order. Default: every supported agent found on `PATH`.
+- `wordmark`: `"search"` (default, `❯ hertrees │` on the search line), `"pixel"`,
+  `"pixel-small"`, `"braille"`, `"sextant"` or `"icon"` (pixel lettering above it), or `"off"`.
 - Presets are Markdown files in `<config_dir>/presets/`; `plan.md` and `research.md` are
   seeded on first use. Placeholders: `{branch}` `{base}` `{path}` `{repo}` `{pr}`.
   The preset manager opens `$VISUAL`, then `$EDITOR`, then `nvim` or `vi`.

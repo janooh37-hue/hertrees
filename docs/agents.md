@@ -162,6 +162,7 @@ defaults; unknown keys are ignored. Presets belong in files, not a JSON `presets
 | `refresh_ms` | Popup refresh interval, default 900 ms; minimum 200 |
 | `selection_background` | `"auto"` (default), a color, or `null` for no background override |
 | `colors` | Role-to-color object, default `{}`; roles in `src/theme.rs::DEFAULTS` |
+| `wordmark` | Where the name is drawn: `"search"` (default) puts `❯ hertrees │` on the search line; `"pixel"` (3 rows), `"pixel-small"`, `"braille"`, `"sextant"` (2 rows each) and `"icon"` (icon, name, tagline and counts; 9 rows) draw it above a plain search line; `"off"` shows no name. Unknown values use the default. A pixel style falls back to `"search"` when the popup's inner width is narrower than the art (36, 35, 20, 18 and 46 columns) or the list would keep fewer than 5 rows below it; `"search"` itself drops to the plain prompt under 60 columns. `"sextant"` needs a font with Unicode 13 sextants (U+1FB00), else it shows boxes |
 
 Colors accept ANSI names, 0–255 palette indices, or `#RRGGBB`. For a minimal example:
 

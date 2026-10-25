@@ -18,6 +18,7 @@ use crate::session::{self, PromptVars, Started};
 use crate::term::Terminal;
 use crate::textutil::{display_width, pad, sanitize};
 use crate::theme::Theme;
+use crate::wordmark::{self, Style};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -1357,13 +1358,23 @@ impl Picker {
     fn compose(&mut self, width: isize, height: isize) -> Vec<String> {
         let preview_on = self.preview_enabled && self.config.fits_preview((width - 2).max(0), self.preview_chosen);
         self.preview_showing = preview_on;
-        let layout = compute_layout(width, height, preview_on);
+        // A pixel wordmark takes rows above the input line when the list keeps
+        // enough of its own; otherwise the name falls back to the search line.
+        let bare = compute_layout(width, height, preview_on, 0);
+        let wordmark = self.config.wordmark.resolve(bare.inner_width, bare.list_height);
+        let layout = compute_layout(width, height, preview_on, wordmark.rows());
         self.list_top = layout.list_top;
         self.list_height = layout.list_height;
         self.scroll_into_view(layout.list_height);
         self.links.clear();
 
-        let mut rows: Vec<String> = vec![format!(" {}", self.input_line(&layout))];
+        let agents = self.agents.iter().map(Vec::len).sum();
+        let mut rows: Vec<String> =
+            wordmark::render(&self.theme, wordmark, layout.inner_width, crate::cli::VERSION, self.worktrees.len(), agents)
+                .into_iter()
+                .map(|row| format!(" {}", row))
+                .collect();
+        rows.push(format!(" {}", self.input_line(&layout, wordmark)));
         if layout.rules {
             rows.push(format!(" {}", render::render_rule(&self.theme, layout.inner_width)));
         }
@@ -1389,12 +1400,19 @@ impl Picker {
         rows
     }
 
-    fn input_line(&self, layout: &Layout) -> String {
+    fn input_line(&self, layout: &Layout, wordmark: Style) -> String {
         let width = layout.inner_width;
         match &self.mode {
-            Mode::List | Mode::Busy(_) => {
-                render::render_search(&self.theme, &self.query.text, self.query.cursor, width, PLACEHOLDER, PLACEHOLDER_SHORT, scope_chip(self.scope))
-            }
+            Mode::List | Mode::Busy(_) => render::render_search(
+                &self.theme,
+                &self.query.text,
+                self.query.cursor,
+                width,
+                PLACEHOLDER,
+                PLACEHOLDER_SHORT,
+                scope_chip(self.scope),
+                wordmark == Style::Search,
+            ),
             Mode::Branch(edit) => {
                 let base = self.base_branch().unwrap_or_else(|| "HEAD".into());
                 let placeholder = format!("branch name for the new worktree — from {}", base);
@@ -1936,6 +1954,65 @@ mod tests {
         let short = crate::textutil::strip_ansi(&picker.compose(80, 12).join("\n"));
         assert!(short.contains("not a git project"));
         assert!(!short.contains('█'));
+    }
+
+    fn plain(picker: &mut Picker, width: isize, height: isize) -> Vec<String> {
+        picker.compose(width, height).iter().map(|row| crate::textutil::strip_ansi(row)).collect()
+    }
+
+    #[test]
+    fn pixel_wordmarks_sit_above_a_plain_search_line_or_fall_back_to_it() {
+        let _lock = env_lock();
+        let tmp = TempDir::new();
+        let mut env = EnvVars::new();
+        let mut picker = preset_picker(tmp.path(), &mut env);
+        picker.mode = Mode::List;
+        for style in [Style::Pixel, Style::PixelSmall, Style::Braille, Style::Sextant, Style::Icon] {
+            picker.config.wordmark = style;
+            let rows = plain(&mut picker, 100, 30);
+            let header = style.rows() as usize;
+            assert_eq!(rows.len(), 30, "{style:?}");
+            assert!(!rows[0].trim().is_empty(), "{style:?}: the art starts on the first row");
+            assert!(rows[header].starts_with(" ❯  search worktrees"), "{style:?}: {:?}", rows[header]);
+            assert!(rows[header + 1].trim_start().starts_with('─'), "{style:?}: the rule follows");
+            assert_eq!(picker.list_top, header as isize + 2);
+            assert_eq!(picker.list_height, 30 - 4 - header as isize);
+            assert!(rows.join("\n").contains("not a git project"));
+            // Too short for the art and five list rows: the search-line wordmark.
+            let short = plain(&mut picker, 100, header as isize + 4 + wordmark::MIN_LIST_ROWS - 1);
+            assert!(short[0].starts_with(" ❯ hertrees │ "), "{style:?}: {:?}", short[0]);
+            assert_eq!(picker.list_top, 2);
+            // Too narrow for the art: the same fallback, plain below 60 columns.
+            let narrow = plain(&mut picker, style.min_width() + 1, 30);
+            assert!(narrow[0].starts_with(" ❯ "), "{style:?}: {:?}", narrow[0]);
+            assert!(!narrow[0].contains("hertrees") && !narrow[0].contains('▀'));
+        }
+        picker.config.wordmark = Style::Off;
+        assert!(plain(&mut picker, 100, 30)[0].starts_with(" ❯  search worktrees"));
+        picker.config.wordmark = Style::Search;
+        assert!(plain(&mut picker, 100, 30)[0].starts_with(" ❯ hertrees │ "));
+    }
+
+    #[test]
+    fn clicks_land_on_the_row_drawn_below_a_multi_row_wordmark() {
+        let _lock = env_lock();
+        let tmp = TempDir::new();
+        let mut env = EnvVars::new();
+        let mut picker = preset_picker(tmp.path(), &mut env);
+        picker.config.wordmark = Style::Icon;
+        let rows = plain(&mut picker, 100, 30);
+        let top = picker.list_top as usize;
+        assert_eq!(top, Style::Icon.rows() as usize + 2);
+        assert!(rows[top].contains("claude") && rows[top + 1].contains("codex"), "{rows:#?}");
+        // Mouse rows are 1-based: the art and input rows select nothing.
+        for y in 1..=top as i128 {
+            picker.consume(&[Event::Mouse { kind: MouseKind::Press, x: 5, y }]);
+            let Mode::Agent { selected, .. } = &picker.mode else { panic!() };
+            assert_eq!(*selected, 1, "row {y}");
+        }
+        picker.consume(&[Event::Mouse { kind: MouseKind::Press, x: 5, y: top as i128 + 1 }]);
+        let Mode::Agent { selected, .. } = &picker.mode else { panic!() };
+        assert_eq!(*selected, 0, "the click on the claude row selects it");
     }
 
     #[test]
