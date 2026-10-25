@@ -166,3 +166,16 @@ Colors accept ANSI names, 0–255 palette indices, or `#RRGGBB`. For a minimal e
   "colors": { "pr_merged": "bright_green" }
 }
 ```
+
+## Interface details
+
+- **PR matching:** branches are matched by name and owner, so fork PRs with the same branch
+  name are ignored; a branch whose upstream has another name is matched through the upstream
+  (never when that upstream is the default branch).
+- **`○ PR ?` reasons:** `gh` missing, not logged in, offline, non-GitHub remote, or detached
+  HEAD. The picker never shows "no PR" when it could not check.
+- **Links:** the `#N` chip is an OSC 8 hyperlink and a click target; the preview shows the PR
+  title and URL.
+- **New sessions:** `^t` opens a new tab if the worktree's workspace is already open. Pick the
+  agent, then `⇥` cycles presets; `^e` manages them and `^s` saves a custom prompt. If the agent
+  stops at a startup question (Claude's folder-trust prompt), the prompt waits until you answer.

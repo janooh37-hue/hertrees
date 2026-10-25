@@ -11,23 +11,11 @@ it needs only Herdr, `git` and, for pull request state, an authenticated `gh`.
 
 <p align="center"><img src="docs/media/demo.gif" alt="Hertrees popup: cycle scopes with Tab, press ^x for a new worktree, pick from 24 supported agents, choose a preset or write and save a custom prompt" width="860"></p>
 
-- **Any project.** The popup shows the repository of the pane you opened it from, even
-  from inside a linked worktree. Nothing to configure per repo.
-- **PR state per worktree:** `✓ merged`, `◉ open`, `◐ draft`, `● closed`, `no PR`, or
-  `○ PR ?` with the reason (gh missing, not logged in, offline, non-GitHub remote,
-  detached HEAD). It never claims "no PR" when it could not check.
-  Branches are matched by name and owner (fork PRs with the same branch name are ignored);
-  a branch whose upstream has another name is matched through the upstream.
-- **Links.** The `#N` chip is an OSC 8 hyperlink and a click target; `^b` opens the
-  selected PR in the browser. The preview shows the PR title and URL.
-- **Agents.** The left glyph is herdr's status of the agents running in that checkout
-  (`◉` needs you, `◐` working, `●` done, `✓` idle); the preview lists them.
-- **New sessions.** `^t` starts an agent in the selected worktree (a new tab if its
-  workspace is already open); `^x` makes a new worktree from the default branch and starts
-  an agent (or just a shell) in it. Pick the agent, then `⇥` a preset first prompt:
-  `blank`, your saved templates (initially `plan` and `research`), or `custom`. Manage
-  templates with `^e`; save a custom prompt with `^s`. If the agent stops at a startup
-  question (Claude's folder-trust prompt), the prompt waits until you answer it.
+- **Any project:** shows the repository of the pane you opened it from, even inside a linked worktree.
+- **PR state per worktree:** `✓ merged`, `◉ open`, `◐ draft`, `● closed`, `no PR`, or `○ PR ?` when it could not check.
+- **Links:** `#N` is a clickable link; `^b` opens the PR in the browser.
+- **Agents:** the left glyph is Herdr's status of the agents in that checkout (`◉` needs you, `◐` working, `●` done, `✓` idle).
+- **New sessions:** `^t` starts an agent in the selected worktree, `^x` creates a worktree and starts one, with a preset first prompt (`blank`, `plan`, `research`, your own, or `custom`).
 - **Local facts:** dirty files `±N`, ahead/behind `↑↓`, last commit age, recent commits.
 
 ## Install
