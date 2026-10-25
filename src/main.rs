@@ -1,5 +1,5 @@
 //! hertrees: every git worktree of a project, its pull request, and agent
-//! sessions, in one Herdr popup that looks like herdr-bar.
+//! sessions, in one Herdr popup.
 
 mod app;
 mod cli;

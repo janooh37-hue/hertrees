@@ -3,7 +3,7 @@
 //! Read from `$HERDR_PLUGIN_CONFIG_DIR/config.json`. Unknown keys are ignored,
 //! and a broken file falls back to defaults instead of taking the picker down.
 //! The display keys (`preview`, `mouse`, `agent_icons`, `refresh_ms`, `colors`,
-//! `selection_background`) mean exactly what they mean in herdr-bar.
+//! `selection_background`) are documented in the README.
 
 use crate::pyjson::{self, Map, Value};
 use crate::pystr;

@@ -374,7 +374,7 @@ mod backend {
             let thread_id = self.thread_id;
             let handle = std_handle(STD_INPUT_HANDLE) as usize;
             std::thread::Builder::new()
-                .name("herdr-bar-console".into())
+                .name("hertrees-console".into())
                 .spawn(move || {
                     thread_id.store(unsafe { GetCurrentThreadId() }, Ordering::SeqCst);
                     let mut buffer = vec![0u16; READ_CHARS];

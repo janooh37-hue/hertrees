@@ -1,8 +1,7 @@
 //! Compose the picker's rows.
 //!
 //! The geometry, input line, rules, footer, empty state, preview column and
-//! scrollbar are herdr-bar's (MIT, see LICENSE.herdr-bar), so the two popups
-//! look the same. Everything is drawn as full rows into the popup's inner
+//! scrollbar derive from herdr-bar (MIT, see LICENSE.herdr-bar). Everything is drawn as full rows into the popup's inner
 //! area: Herdr already draws the popup border, so the picker stays borderless
 //! and full-bleed. Rows are composed as (role, text) segments, measured in
 //! display columns, and only then turned into escape sequences -- which keeps

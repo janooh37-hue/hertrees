@@ -17,7 +17,7 @@ or configure it, read [docs/agents.md](docs/agents.md). This file is for changin
   terminal painting, colors, agent glyphs and OSC 8 links.
 - `src/term.rs`, `src/keys.rs`, `src/sequences.rs`: terminal lifecycle and input decoding.
 - `src/fuzzy.rs`, `src/textutil.rs`, `src/unicode_tables.rs`, `src/py*.rs`: matching,
-  display widths and Python-compatible helpers inherited from herdr-bar.
+  display widths and Python-compatible helpers originally derived from herdr-bar (MIT, LICENSE.herdr-bar).
 - `src/client.rs`, `src/host.rs`, `src/opener.rs`, `src/proc.rs`, `src/par.rs`:
   Herdr/OS/process integration; `src/testutil.rs`: test fixtures and environment isolation.
 - `scripts/install.sh`: release build and atomic replacement of `bin/hertrees`.

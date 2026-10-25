@@ -6,20 +6,10 @@
 
 A [Herdr](https://herdr.dev) plugin: every git worktree of the project you are in, in one
 popup, with its pull request state, the agents running in it, and a key to start a new
-agent session there or in a brand-new worktree. It looks and handles like
-[herdr-bar](https://github.com/jeffarese/herdr-bar), whose UI layer it reuses.
+agent session there or in a brand-new worktree. It is a single self-contained binary:
+it needs only Herdr, `git` and, for pull request state, an authenticated `gh`.
 
-```text
- ❯ █ search worktrees, branches, PRs…    @ agents   ⇥ PR state                 everything
- ─────────────────────────────────────────────────────────────────────────────────────
- ▌ ✓ main — myapp                                           ±2 · 1d17h · idle · no PR
-   ✓ feat/login — .worktrees/login               4 agents · 4h · idle · ◉ open #58
-   · feat/dark-mode — .worktrees/dark-mode        12h · current · ◉ open #59
-   · fix/cache-ttl — .worktrees/cache-ttl                    2d11h · ✓ merged #47
-   · detached@5b50301 — .worktrees/spike                       ±2 · 10h · ○ PR ?
- ─────────────────────────────────────────────────────────────────────────────────────
- ↑↓ move  ⏎ open  ^t agent  ^x new  ^b PR  ⇥ scope  ^r refresh  ^o preview  esc quit  30
-```
+<p align="center"><img src="docs/media/demo.gif" alt="Hertrees popup: cycling scopes with Tab, then ^x to create a worktree and choose an agent and preset" width="860"></p>
 
 - **Any project.** The popup shows the repository of the pane you opened it from, even
   from inside a linked worktree. Nothing to configure per repo.
@@ -114,7 +104,17 @@ presets. In the preset manager: type to filter, `⏎` edits, `^x` creates, `^r` 
   not exist; edit, rename or delete them freely. `blank` and `custom` remain built-in.
   Placeholders: `{branch}` `{base}` `{path}` `{repo}` `{pr}`.
 - The preset manager opens `$VISUAL`, then `$EDITOR`, otherwise `nvim` or `vi`.
-- `colors` accepts herdr-bar's roles too (`accent`, `muted`, `blocked`, `working`, …).
+- `colors` maps role names to a colour: an ANSI name (`red`, `bright_blue`, `gray`, …), a
+  0-255 index, a `#rrggbb` hex value, or `default`. Roles: `accent`, `text`, `muted`,
+  `match`, the agent states `blocked`, `working`, `done`, `idle`, `unknown`, the PR states
+  `pr_open`, `pr_draft`, `pr_merged`, `pr_closed`, and per-agent colours `agent_claude`,
+  `agent_codex`, `agent_kimi`, `agent_pi`, `agent_grok`, `agent_gemini`, `agent_cursor`,
+  `agent_opencode`.
+- Fonts and icons: the default `"agent_icons": "auto"` shows a vendor logo before each
+  agent row only when the optional "Herdr Agent Icons Max" font is installed (checked in the
+  user font directories and with `fc-match` on Linux). Without it nothing is drawn, only the
+  plain Unicode status glyphs. Set `"agent_icons": "none"` to turn the logos off explicitly,
+  or `"font"` to force them when the font is installed on a remote terminal.
 - PR data is cached in `$XDG_CACHE_HOME/hertrees/` and served stale while it refreshes.
 
 ## Command line
@@ -152,8 +152,9 @@ the per-wait timeout (90 seconds by default). See `bash scripts/e2e.sh --help`.
 
 Hertrees is made by Ahmed Al Ali. Brand assets and usage notes are in [`branding/`](branding).
 
-The terminal, painter, input decoder, theme, fuzzy matcher and row layout come from
-herdr-bar by Jeff Arese, MIT licensed (`LICENSE.herdr-bar`).
+The terminal UI layer (painter, input decoder, theme, fuzzy matcher, row layout) started from
+herdr-bar by Jeff Arese (MIT, <https://github.com/jeffarese/herdr-bar>, `LICENSE.herdr-bar`).
+Hertrees is now an independent project.
 
 ## License
 

@@ -1,7 +1,6 @@
 //! The picker: state, key handling, background loads, and the draw loop.
 //!
-//! Input, navigation, layout and painting follow herdr-bar's `app.rs` so the
-//! two popups feel the same; the rows are a project's worktrees instead of
+//! Portions derived from herdr-bar (MIT, see LICENSE.herdr-bar). The rows are a project's worktrees instead of
 //! Herdr's tabs, and Enter can start an agent session as well as jump.
 
 use crate::client::HerdrClient;
@@ -57,7 +56,7 @@ fn scope_chip(scope: &str) -> &'static str {
     }
 }
 
-/// `42s`, `7m`, `2h04m`, `3d4h`: herdr-bar's running-time format.
+/// `42s`, `7m`, `2h04m`, `3d4h`: compact running-time format.
 pub fn format_age(seconds: i64) -> String {
     if seconds < 0 {
         return String::new();
