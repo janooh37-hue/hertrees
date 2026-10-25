@@ -40,6 +40,32 @@ fn git(path: &str, args: &[&str]) -> Option<Vec<u8>> {
     output.success.then_some(output.stdout)
 }
 
+/// Keep new checkouts under the main repository, even when invoked from a linked one.
+pub fn new_worktree_path(project: &Project, branch: &str) -> PathBuf {
+    Path::new(&project.repo_root).join(".worktrees").join(branch)
+}
+
+/// Ignore local checkouts without editing a tracked .gitignore.
+pub fn ignore_worktrees(repo_root: &str) -> Result<(), String> {
+    use std::io::Write;
+    if git(repo_root, &["check-ignore", "-q", "--", ".worktrees/"]).is_some() { return Ok(()); }
+    let path = git(repo_root, &["rev-parse", "--path-format=absolute", "--git-path", "info/exclude"])
+        .ok_or("Cannot locate Git's local exclude file")?;
+    let path = PathBuf::from(String::from_utf8(path).map_err(|e| format!("Invalid Git exclude path: {e}"))?.trim_end_matches('\n'));
+    let contents = match std::fs::read(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(format!("Cannot read Git excludes: {error}")),
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("Cannot create Git exclude directory: {e}"))?;
+    }
+    let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path)
+        .map_err(|e| format!("Cannot open Git excludes: {e}"))?;
+    let entry = if contents.is_empty() || contents.ends_with(b"\n") { b"/.worktrees/\n".as_slice() } else { b"\n/.worktrees/\n".as_slice() };
+    file.write_all(entry).map_err(|e| format!("Cannot ignore local worktrees: {e}"))
+}
+
 /// Discover through Herdr so linked checkouts resolve to their main repository.
 pub fn load(client: &mut HerdrClient, cwd: &str) -> Result<(Project, Vec<Worktree>), String> {
     let result = client
@@ -225,6 +251,41 @@ pub fn git_facts(path: &str) -> GitFacts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_worktrees_use_main_repository_not_source_checkout() {
+        let project = Project { repo_root: "/tmp/project".into(), source_checkout: "/tmp/linked".into(), ..Project::default() };
+        assert_eq!(new_worktree_path(&project, "scratch"), Path::new("/tmp/project/.worktrees/scratch"));
+        assert_eq!(new_worktree_path(&project, "feat/cache"), Path::new("/tmp/project/.worktrees/feat/cache"));
+    }
+
+    #[test]
+    fn worktree_exclude_preserves_existing_contents_and_is_idempotent() {
+        let _guard = crate::testutil::env_lock();
+        let temp = crate::testutil::TempDir::new();
+        let repo = temp.path().to_str().unwrap();
+        assert!(std::process::Command::new("git").args(["init", "-q", repo]).status().unwrap().success());
+        let exclude = temp.path().join(".git/info/exclude");
+        std::fs::write(&exclude, b"local-file").unwrap();
+        ignore_worktrees(repo).unwrap();
+        assert_eq!(std::fs::read(&exclude).unwrap(), b"local-file\n/.worktrees/\n");
+        ignore_worktrees(repo).unwrap();
+        assert_eq!(std::fs::read(&exclude).unwrap(), b"local-file\n/.worktrees/\n");
+        assert!(!temp.path().join(".gitignore").exists());
+    }
+
+    #[test]
+    fn already_ignored_worktrees_leave_local_excludes_unchanged() {
+        let _guard = crate::testutil::env_lock();
+        let temp = crate::testutil::TempDir::new();
+        let repo = temp.path().to_str().unwrap();
+        assert!(std::process::Command::new("git").args(["init", "-q", repo]).status().unwrap().success());
+        std::fs::write(temp.path().join(".gitignore"), b"/.worktrees/\n").unwrap();
+        let exclude = temp.path().join(".git/info/exclude");
+        let before = std::fs::read(&exclude).unwrap();
+        ignore_worktrees(repo).unwrap();
+        assert_eq!(std::fs::read(exclude).unwrap(), before);
+    }
 
     #[test]
     fn context_prefers_focused_pane_then_workspace_then_checkout() {
