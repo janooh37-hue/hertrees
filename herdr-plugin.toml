@@ -1,0 +1,36 @@
+id = "hertrees"
+name = "Hertrees"
+version = "0.2.0"
+# Needs worktree.list/create/open, agent.start/wait/prompt and popup plugin panes.
+min_herdr_version = "0.9.3"
+description = "Every git worktree of a project with its PR state, and agent sessions, in one popup"
+platforms = ["linux", "macos"]
+
+# On install Herdr runs this in the plugin directory: it builds bin/hertrees
+# from source with cargo (Rust 1.88+).
+[[build]]
+command = ["sh", "scripts/install.sh"]
+
+# Opening the picker is a one-liner through the Herdr CLI. HERDR_BIN_PATH can
+# outlive the binary it points at when Herdr is upgraded under a running
+# server, so fall back to whatever is on PATH (same as herdr-bar).
+[[actions]]
+id = "open"
+title = "Open worktrees"
+description = "Worktrees of this project, their pull requests, and agent sessions"
+contexts = ["global"]
+command = [
+  "sh",
+  "-c",
+  'herdr_bin="${HERDR_BIN_PATH:-herdr}"; [ -x "$herdr_bin" ] || herdr_bin=herdr; exec "$herdr_bin" plugin pane open --plugin hertrees --entrypoint picker --placement popup',
+]
+
+# Same popup geometry as herdr-bar, so the two look alike.
+[[panes]]
+id = "picker"
+title = "Worktrees"
+description = "Worktrees of this project, their pull requests, and agent sessions"
+placement = "popup"
+width = "74%"
+height = "62%"
+command = ["bin/hertrees"]

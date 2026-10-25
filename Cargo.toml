@@ -1,0 +1,37 @@
+[package]
+name = "hertrees"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.88"
+description = "Herdr plugin: every git worktree of a project, its PR state, and agent sessions, in one popup"
+license = "MIT"
+publish = false
+authors = ["Ahmed Al Ali"]
+repository = "https://github.com/janooh37-hue/hertrees"
+homepage = "https://github.com/janooh37-hue/hertrees"
+readme = "README.md"
+
+[[bin]]
+name = "hertrees"
+path = "src/main.rs"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+    "Win32_System_SystemInformation",
+    "Win32_Security",
+] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true

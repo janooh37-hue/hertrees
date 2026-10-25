@@ -1,0 +1,163 @@
+# Using Hertrees from an agent
+
+Use this guide when operating the plugin, not changing its implementation. Start with
+`bin/hertrees --help` in the plugin checkout (or `hertrees --help` if it is on `PATH`).
+Examples below use `bin/hertrees` and an example repository at `/tmp/demo`; substitute
+real paths and installed agent kinds. Session commands require a running Herdr server.
+
+For exact interfaces, inspect `src/cli.rs` (`list`, `print_presets`, `parse_start`,
+`start`), `src/presets.rs` (files and names), and `src/config.rs` (lookup and keys).
+These are authoritative if an installed binary differs from this guide. Headless commands
+print JSON to stdout; command errors use exit status **2** and stderr prefixed `hertrees:`.
+Parse JSON rather than scraping the popup. Exit status 0 from `start` reports a launched
+session, not completion of the agent's task.
+
+## Discover checkouts
+
+```sh
+bin/hertrees --list --cwd /tmp/demo
+```
+
+`--cwd` selects the repository; without it, Hertrees uses the focused-pane context when
+provided, otherwise the shell cwd outside plugin mode. The JSON object contains:
+
+- `repo_root`: main repository path; `source_checkout`: checkout containing the supplied
+  directory; `default_branch`: branch name or null.
+- `worktrees`: an array of objects, each with `path`, `branch` (nullable), `head`, `main`
+  and `detached` booleans, and `workspace` (Herdr workspace ID or null).
+- Each worktree also has `pr_state` (`merged`, `open`, `draft`, `closed`, `none`,
+  `unknown`), `pr_number` and `pr_url` (nullable), `pr_via_upstream` (boolean),
+  `pr_reason` (nullable), and `agents` (an array of `kind`, nullable `name`, `status`,
+  and `pane_id` objects).
+
+Choose an existing checkout by its returned `path`, not its branch label. For
+`pr_state: "unknown"`, inspect `pr_reason`; missing data is not evidence of no PR.
+
+## Choose a prompt
+
+```sh
+bin/hertrees presets
+```
+
+Returns `{"dir": "/…/presets", "presets": […]}`. Each entry has `name`, `path` and
+`prompt` strings; `prompt` is the unexpanded template. `dir` can be null if no config
+location is available. This command lists only file presets, not the built-in `blank`
+(no first prompt) or `custom` (interactive input) choices. It may seed the initial
+files as described under [preset files](#preset-files).
+
+## Start a session
+
+Pass exactly one target: `--path` for a checkout returned by `--list`, or `--branch`
+for a **new** branch/worktree. `--base` is valid only with `--branch`; omit it to use
+Herdr's default base. An existing workspace gets a fresh tab for the new agent.
+`--agent` is required and must name a supported agent installed on `PATH`; popup
+`agents`/`default_agent` preferences do not select or restrict this explicit CLI choice.
+
+```sh
+# Existing checkout; plan must appear in the presets listing.
+bin/hertrees start --cwd /tmp/demo --path /tmp/demo --agent claude --preset plan
+
+# New branch with a literal first-prompt template, focusing the destination.
+bin/hertrees start --cwd /tmp/demo --branch feat/cache --base main \
+  --agent codex --prompt 'Implement the cache in {path} on {branch}.' --focus
+
+# A new worktree containing only a shell, with no agent or prompt.
+bin/hertrees start --cwd /tmp/demo --branch scratch --agent shell --focus
+```
+
+Omitting both prompt options selects `blank`. `--preset NAME` selects a file by its
+case-sensitive name, or `blank`; `custom` requires `--prompt TEXT` instead. `--preset`
+and `--prompt` are mutually exclusive. Both file and direct prompts expand the
+[placeholders](#placeholders). `--agent shell` is only valid with `--branch`; leave
+prompt options off because a shell has no agent to receive them. Focus remains
+unchanged unless `--focus` is supplied.
+
+### Session results
+
+`start` returns one object with string fields `workspace_id`, `tab_id`, `pane_id`,
+`agent`, `path`, plus boolean `prompt_deferred`. `agent` is the assigned session name
+(not its kind), or the empty string for a shell; `path` is the actual checkout, including
+when Herdr chose the location for a new branch.
+
+`prompt_deferred: true` means the initial prompt is queued for startup readiness,
+not yet acknowledged as submitted. A folder-trust question or slow startup can cause
+this. Inspect the returned pane and resolve any startup question with the user's
+permission; the queued prompt is delivered automatically after readiness. Avoid
+resubmitting it yourself. The sender stops if the agent disappears or after 15 minutes,
+so this flag is not a delivery guarantee. `false` means no prompt was requested or
+submission succeeded; it is not evidence that the task finished.
+
+## Preset files
+
+Treat presets as user-owned Markdown files: `<config_dir>/presets/<name>.md`, with the
+whole file as the prompt (no frontmatter required). Internal newlines are preserved;
+outer whitespace is trimmed on load. Read the `dir` from `presets` rather than guessing
+the user's config path. To create a preset there, write a new file without overwriting
+an existing name; edit its content, rename the file, or delete it with normal file
+operations. No server reload is needed; headless commands load fresh files and the
+popup reloads when entering its preset manager or returning from its editor.
+
+For example, once `preset_dir` is set to the returned `dir`:
+
+```sh
+# Create only if review.md does not already exist.
+(set -C; printf '%s\n' 'Review {branch} against {base} in {path}; report issues.' > "$preset_dir/review.md")
+# Edit review.md with your file-editing tool, then run:
+bin/hertrees start --cwd /tmp/demo --path /tmp/demo --agent claude --preset review
+# When no longer wanted, delete review.md with your file-removal tool.
+```
+
+Names are nonempty after trimming, at most 40 characters, cannot start with `.`, and
+cannot contain `/` or NUL. `blank` and `custom` are reserved case-insensitively. Use
+names without surrounding whitespace. Only valid `.md` files are loaded, sorted
+case-insensitively by name (case-sensitive tie-break). `plan.md` and `research.md` are
+seeded **only when the presets directory does not exist**; editing, renaming or deleting
+them sticks. An existing empty directory stays empty. Built-in choices are not files.
+
+### Placeholders
+
+| Token | Expansion |
+|---|---|
+| `{branch}` | Checkout's branch label; new branch name when creating |
+| `{base}` | Explicit base, otherwise detected default branch, otherwise `HEAD` |
+| `{path}` | Actual destination checkout path |
+| `{repo}` | Repository name, not its filesystem root |
+| `{pr}` | `#N URL` when available, otherwise `none` |
+
+Other brace expressions are left alone. `{pr}` being `none` does not distinguish a
+failed lookup from absence; use the discovery JSON for that distinction.
+
+## Configuration
+
+`config_dir` is the first available location:
+
+1. Nonempty `HERDR_PLUGIN_CONFIG_DIR`.
+2. `$XDG_CONFIG_HOME/herdr/plugins/config/hertrees` when `XDG_CONFIG_HOME` is nonempty.
+3. `~/.config/herdr/plugins/config/hertrees`.
+
+`config.json` in that directory is optional. Missing or invalid files fall back to
+defaults; unknown keys are ignored. Presets belong in files, not a JSON `presets` key.
+
+| Key | Meaning / default |
+|---|---|
+| `agents` | Ordered popup agent kinds; `[]` means all supported agents found on `PATH` |
+| `default_agent` | Initially selected popup agent; unset by default |
+| `pr_cache_ttl_s` | PR cache freshness, default 60 seconds; clamped to 0–86400 |
+| `scope` | Initial popup scope: `all` (default), `nopr`, `open`, `draft`, `merged`, `closed`, `agents` |
+| `preview` | `"auto"` (default), `true` or `false`; auto fits a preview when space allows |
+| `mouse` | Enable popup mouse input; default `true` |
+| `agent_icons` | `"auto"` detects the icon font (default), `"font"` forces it; other values disable icons |
+| `refresh_ms` | Popup refresh interval, default 900 ms; minimum 200 |
+| `selection_background` | `"auto"` (default), a color, or `null` for no background override |
+| `colors` | Role-to-color object, default `{}`; roles in `src/theme.rs::DEFAULTS` |
+
+Colors accept ANSI names, 0–255 palette indices, or `#RRGGBB`. For a minimal example:
+
+```json
+{
+  "agents": ["claude", "codex"],
+  "default_agent": "codex",
+  "pr_cache_ttl_s": 60,
+  "colors": { "pr_merged": "bright_green" }
+}
+```
