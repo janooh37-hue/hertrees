@@ -1,6 +1,6 @@
 [package]
 name = "hertrees"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 rust-version = "1.88"
 description = "Herdr plugin: every git worktree of a project, its PR state, and agent sessions, in one popup"

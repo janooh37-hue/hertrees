@@ -12,6 +12,7 @@ use crate::paint::Painter;
 use crate::pr::{self, GhRepo, PrSnapshot};
 use crate::presets::{self, Preset};
 use crate::project;
+use crate::pyjson;
 use crate::pystr;
 use crate::render::{self, compute_layout, scrollbar_column, Item, Layout, Meta, Row, Segment};
 use crate::session::{self, PromptVars, Started};
@@ -311,6 +312,8 @@ pub struct Picker {
     links: BTreeMap<isize, (isize, isize, String)>,
     list_top: isize,
     list_height: isize,
+    /// The last drawn popup size, so ^l can tell whether a style fits.
+    size: (isize, isize),
     last_refresh: f64,
     dirty: bool,
     painter: Painter,
@@ -365,6 +368,7 @@ impl Picker {
             tx,
             rx,
             pending_facts: 0,
+            size: (0, 0),
         };
         picker.take(loaded);
         picker
@@ -765,6 +769,7 @@ impl Picker {
             }
             "ctrl+b" => self.open_selected_pr(),
             "ctrl+r" => self.reload(),
+            "ctrl+l" => self.cycle_wordmark(),
             "ctrl+t" => {
                 if let Some(index) = self.selected_index() {
                     let wt = &self.worktrees[index];
@@ -801,6 +806,23 @@ impl Picker {
             }
         }
         None
+    }
+
+    /// ^l: the next wordmark style, drawn at once and saved to config.json.
+    fn cycle_wordmark(&mut self) {
+        let style = self.config.wordmark.next();
+        self.config.wordmark = style;
+        self.dirty = true;
+        let (width, height) = self.size;
+        let bare = compute_layout(width, height, self.preview_showing, 0);
+        let shown = match style.resolve(bare.inner_width, bare.list_height) {
+            Style::Search if style != Style::Search => " (needs a larger popup)",
+            _ => "",
+        };
+        match Config::store("wordmark", pyjson::Value::str(style.name())) {
+            Ok(_) => self.flash(format!("wordmark: {}{}", style.name(), shown), "accent"),
+            Err(error) => self.flash(format!("wordmark: {} — not saved: {}", style.name(), error), "blocked"),
+        }
     }
 
     fn open_selected_pr(&mut self) {
@@ -1356,6 +1378,7 @@ impl Picker {
     }
 
     fn compose(&mut self, width: isize, height: isize) -> Vec<String> {
+        self.size = (width, height);
         let preview_on = self.preview_enabled && self.config.fits_preview((width - 2).max(0), self.preview_chosen);
         self.preview_showing = preview_on;
         // A pixel wordmark takes rows above the input line when the list keeps
@@ -1780,6 +1803,7 @@ impl Picker {
                         ("⇥", "scope"),
                         ("^r", "refresh"),
                         ("^o", "preview"),
+                        ("^l", "wordmark"),
                         ("esc", "quit"),
                     ]
                 };
@@ -1991,6 +2015,34 @@ mod tests {
         assert!(plain(&mut picker, 100, 30)[0].starts_with(" ❯  search worktrees"));
         picker.config.wordmark = Style::Search;
         assert!(plain(&mut picker, 100, 30)[0].starts_with(" ❯ hertrees │ "));
+    }
+
+    #[test]
+    fn ctrl_l_cycles_the_wordmark_live_and_saves_it() {
+        let _lock = env_lock();
+        let tmp = TempDir::new();
+        let mut env = EnvVars::new();
+        let mut picker = preset_picker(tmp.path(), &mut env);
+        picker.mode = Mode::List;
+        plain(&mut picker, 100, 30);
+        key(&mut picker, "ctrl+l");
+        assert_eq!(picker.config.wordmark, Style::Pixel);
+        assert_eq!(picker.status.as_ref().unwrap().0, "wordmark: pixel");
+        assert_eq!(Config::load().wordmark, Style::Pixel);
+        assert!(plain(&mut picker, 100, 30)[0].contains('█'), "drawn without reopening the popup");
+        // A popup too small for the art says so, and still saves the choice.
+        plain(&mut picker, 100, 8);
+        key(&mut picker, "ctrl+l");
+        assert_eq!(picker.status.as_ref().unwrap().0, "wordmark: pixel-small (needs a larger popup)");
+        for _ in 2..wordmark::NAMES.len() {
+            key(&mut picker, "ctrl+l");
+        }
+        assert_eq!((picker.config.wordmark, Config::load().wordmark), (Style::Search, Style::Search));
+        std::fs::write(tmp.path().join("config.json"), "{broken").unwrap();
+        key(&mut picker, "ctrl+l");
+        assert_eq!(picker.config.wordmark, Style::Pixel);
+        assert_eq!(picker.status.as_ref().unwrap().1, "blocked");
+        assert_eq!(std::fs::read_to_string(tmp.path().join("config.json")).unwrap(), "{broken");
     }
 
     #[test]

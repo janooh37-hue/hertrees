@@ -61,6 +61,17 @@ impl Style {
         NAMES.iter().find(|(known, _)| *known == name).map(|(_, style)| *style)
     }
 
+    /// The name config.json uses for this style.
+    pub fn name(self) -> &'static str {
+        NAMES.iter().find(|(_, style)| *style == self).map(|(name, _)| *name).unwrap_or("search")
+    }
+
+    /// The style after this one in `NAMES`, wrapping round (the popup's ^l).
+    pub fn next(self) -> Style {
+        let index = NAMES.iter().position(|(_, style)| *style == self).unwrap_or(0);
+        NAMES[(index + 1) % NAMES.len()].1
+    }
+
     fn art(self) -> Option<Art> {
         Some(match self {
             Style::Pixel => PIXEL,
@@ -230,6 +241,17 @@ mod tests {
     use crate::textutil::{strip_ansi, visible_width};
 
     const ART: [Style; 5] = [Style::Pixel, Style::PixelSmall, Style::Braille, Style::Sextant, Style::Icon];
+
+    #[test]
+    fn names_round_trip_and_next_visits_every_style_once() {
+        let mut style = Style::Search;
+        for (name, expected) in NAMES {
+            assert_eq!((style, style.name()), (*expected, *name));
+            assert_eq!(Style::parse(style.name()), Some(style));
+            style = style.next();
+        }
+        assert_eq!(style, Style::Search, "wraps back to the default");
+    }
 
     #[test]
     fn art_rows_line_up_and_name_known_roles() {

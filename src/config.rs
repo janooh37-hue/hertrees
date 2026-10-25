@@ -8,7 +8,7 @@
 use crate::pyjson::{self, Map, Value};
 use crate::pystr;
 use crate::wordmark::Style;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub const SCOPES: &[&str] = &["all", "nopr", "open", "draft", "merged", "closed", "agents"];
 
@@ -132,6 +132,14 @@ impl Config {
         }
     }
 
+    /// Sets one key in config.json, keeping every other key and their order.
+    /// A file that is not a JSON object is left alone and reported.
+    pub fn store(key: &str, value: Value) -> Result<PathBuf, String> {
+        let path = Config::path().ok_or("no configuration directory available")?;
+        store_in(&path, key, value)?;
+        Ok(path)
+    }
+
     /// Whether the preview is showing before anyone presses ^o.
     pub fn preview_starts_on(&self) -> bool {
         !self.preview.is_false()
@@ -144,6 +152,29 @@ impl Config {
         }
         available_width >= 92
     }
+}
+
+fn store_in(path: &Path, key: &str, value: Value) -> Result<(), String> {
+    let mut values = match std::fs::read(path) {
+        Ok(data) => match String::from_utf8(data).ok().map(|text| pyjson::loads(&text)) {
+            Some(Ok(Value::Dict(map))) => map,
+            _ => return Err("config.json is not a JSON object; left unchanged".into()),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Map::new(),
+        Err(error) => return Err(format!("cannot read config.json: {}", error)),
+    };
+    values.insert(key, value);
+    let text = format!("{}\n", pyjson::dumps_indent(&Value::Dict(values), 2));
+    let write = || -> std::io::Result<()> {
+        std::fs::create_dir_all(path.parent().unwrap_or(Path::new(".")))?;
+        let temporary = path.with_extension(format!("json.{}.tmp", std::process::id()));
+        let result = std::fs::write(&temporary, &text).and_then(|()| std::fs::rename(&temporary, path));
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+        result
+    };
+    write().map_err(|error| format!("cannot save config.json: {}", error))
 }
 
 #[cfg(test)]
@@ -205,5 +236,25 @@ mod tests {
         for json in [r#"{"wordmark": "border"}"#, r#"{"wordmark": ""}"#, r#"{"wordmark": 3}"#, r#"{"wordmark": null}"#] {
             assert_eq!(with(json).wordmark, Style::Search, "{json}");
         }
+    }
+
+    #[test]
+    fn store_sets_one_key_and_keeps_the_rest_in_order() {
+        let tmp = crate::testutil::TempDir::new();
+        let path = tmp.path().join("nested/config.json");
+        store_in(&path, "wordmark", Value::str("pixel")).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\n  \"wordmark\": \"pixel\"\n}\n");
+        std::fs::write(&path, r##"{"scope": "open", "wordmark": "icon", "colors": {"accent": "#fff"}}"##).unwrap();
+        store_in(&path, "wordmark", Value::str("off")).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let config = with(&text);
+        assert_eq!((config.scope, config.wordmark), ("open", Style::Off));
+        assert!(text.find("scope") < text.find("wordmark") && text.find("wordmark") < text.find("colors"), "{text}");
+        for broken in ["{not json", "[1, 2]"] {
+            std::fs::write(&path, broken).unwrap();
+            assert!(store_in(&path, "wordmark", Value::str("pixel")).is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
+        }
+        assert_eq!(std::fs::read_dir(path.parent().unwrap()).unwrap().count(), 1, "no temporary file is left");
     }
 }

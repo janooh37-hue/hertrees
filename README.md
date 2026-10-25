@@ -60,6 +60,7 @@ Needs Herdr 0.9.3+ on Linux or macOS, `git`, and an authenticated `gh` for PR st
 | `⇥` `⇧⇥` | scope: everything → no PR → open → draft → merged → closed → agents |
 | `@` (empty query) | agents scope |
 | `^r` / `^o` | reload worktrees, agents and PRs / toggle the preview column |
+| `^l` | next wordmark style, shown at once and saved to `config.json` |
 | `^u` `^w` `^a` `^e` `^d` | clear, delete word, home, end, delete forward |
 | `esc` | back / close |
 
@@ -84,6 +85,7 @@ Everything is optional. Edit `~/.config/herdr/plugins/config/hertrees/config.jso
 - `agents`: agent kinds offered, in order. Default: every supported agent found on `PATH`.
 - `wordmark`: `"search"` (default, `❯ hertrees │` on the search line), `"pixel"`,
   `"pixel-small"`, `"braille"`, `"sextant"` or `"icon"` (pixel lettering above it), or `"off"`.
+  `^l` in the popup steps through them and saves the choice here.
 - Presets are Markdown files in `<config_dir>/presets/`; `plan.md` and `research.md` are
   seeded on first use. Placeholders: `{branch}` `{base}` `{path}` `{repo}` `{pr}`.
   The preset manager opens `$VISUAL`, then `$EDITOR`, then `nvim` or `vi`.

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.3 (2026-10-25)
 
 - The search line carries the wordmark: `❯ hertrees │ search worktrees…`, "her" in the
   text colour and "trees" in the idle (leaf) colour, so colour overrides apply. Popups
@@ -12,6 +12,9 @@
   art or the list would keep fewer than 5 rows. `sextant` needs a font with Unicode 13
   sextants. Herdr 0.9.3 has no way to set a plugin pane's border title, so there are no
   border-title styles.
+- `^l` in the popup steps through the wordmark styles, drawing each at once and saving
+  it as `wordmark` in `config.json` (other keys kept). The footer notes when the popup
+  is too small to show the chosen style.
 
 ## 0.2.2 (2026-10-25)
 
