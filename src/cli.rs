@@ -22,7 +22,7 @@ pub const USAGE: &str = "hertrees - every worktree of a project, its pull reques
 
 usage: hertrees [options]
        hertrees presets
-       hertrees start [--cwd PATH] (--path CHECKOUT | --branch NEW [--base REF])
+       hertrees start [--cwd PATH] (--path CHECKOUT | --branch NEW [--base REF] [--label NAME])
                       --agent KIND [--preset NAME] [--prompt TEXT] [--var NAME=VALUE]… [--focus]
        hertrees send [--cwd PATH] --agent NAME [--preset NAME] [--prompt TEXT] [--var NAME=VALUE]…
 
@@ -36,7 +36,8 @@ options:
 subcommands:
   presets          print the preset directories and templates (yours and the repo's) as JSON
   start            start an installed agent in an existing or new worktree
-    --agent KIND   agent kind, or shell (new worktree only)
+    --agent KIND   agent kind, or shell (a new tab, or a new worktree, with no agent)
+    --label NAME   name the new worktree's space (default: the branch)
     --preset NAME  file preset or blank; custom requires --prompt
     --prompt TEXT  first prompt, or text added to --preset (at {input}, else below it)
     --var N=VALUE  value for a placeholder the prompt defines itself, e.g. {ticket}
@@ -133,6 +134,7 @@ struct StartArgs {
     path: Option<String>,
     branch: Option<String>,
     base: Option<String>,
+    label: Option<String>,
     agent: String,
     preset: Option<String>,
     prompt: Option<String>,
@@ -164,6 +166,7 @@ fn parse_start(args: &[String]) -> Result<StartArgs, String> {
             "--path" => &mut parsed.path,
             "--branch" => &mut parsed.branch,
             "--base" => &mut parsed.base,
+            "--label" => &mut parsed.label,
             "--agent" => &mut agent,
             "--preset" => &mut parsed.preset,
             "--prompt" => &mut parsed.prompt,
@@ -183,10 +186,10 @@ fn parse_start(args: &[String]) -> Result<StartArgs, String> {
     if parsed.base.is_some() && parsed.branch.is_none() {
         return Err("--base requires --branch".into());
     }
-    parsed.agent = agent.ok_or("start requires --agent KIND")?;
-    if parsed.agent == "shell" && parsed.path.is_some() {
-        return Err("--agent shell requires --branch, not --path".into());
+    if parsed.label.is_some() && parsed.branch.is_none() {
+        return Err("--label requires --branch".into());
     }
+    parsed.agent = agent.ok_or("start requires --agent KIND")?;
     Ok(parsed)
 }
 
@@ -281,11 +284,14 @@ fn start(args: &[String]) -> Result<(), String> {
     let prompt = finish_prompt(&template, vars, &args.vars, checkout, pr_url)?;
     let prompt = if prompt.is_empty() { None } else { Some(prompt.as_str()) };
     let started = if args.agent == "shell" {
-        session::create_shell(&mut client, &project, args.branch.as_deref().unwrap(), args.base.as_deref())?
+        match &args.branch {
+            Some(branch) => session::create_shell(&mut client, &project, branch, args.base.as_deref(), args.label.as_deref())?,
+            None => session::open_tab(&mut client, &project, wt, &mut |_| {})?,
+        }
     } else {
         let taken = project::agents(&mut client).into_iter().filter_map(|agent| agent.name).collect::<Vec<_>>();
         if let Some(branch) = &args.branch {
-            session::start_new(&mut client, &project, branch, args.base.as_deref(), &args.agent, prompt, &taken, &mut |_| {})?
+            session::start_new(&mut client, &project, branch, args.base.as_deref(), args.label.as_deref(), &args.agent, prompt, &taken, &mut |_| {})?
         } else {
             session::start_existing(&mut client, &project, wt, &args.agent, prompt, &taken, &mut |_| {})?
         }
@@ -457,6 +463,9 @@ pub fn main(args: Vec<String>) -> i32 {
     if config.agent_icons.as_str() == Some("auto") {
         icons::prefetch();
     }
+    if config.icons == "auto" {
+        icons::prefetch_nerd();
+    }
     let (fetched, fetch) = std::sync::mpsc::channel();
     let mut loader = client.clone();
     let load_cwd = cwd.clone();
@@ -475,6 +484,7 @@ pub fn main(args: Vec<String>) -> i32 {
         if auto { default_selection_background(appearance).map(Value::str) } else { Some(configured) };
     let mut theme = Theme::new(Some(&config.colors), selection_background.as_ref(), appearance);
     theme.agent_icons = icons::enabled(&config.agent_icons);
+    theme.tree_icons = icons::tree_icons(Some(config.icons));
 
     let mouse = config.mouse;
     let loaded = fetch.recv().expect("the load thread panicked");
@@ -552,7 +562,7 @@ mod tests {
             (vec!["--branch", "new", "--agent", "claude", "--var", "ticket"], "NAME=VALUE"),
             (vec!["--branch", "new", "--agent", "claude", "--var", "Bad=x"], "lowercase"),
             (vec!["--path", "/repo", "--agent", "claude", "--base", "main"], "--base requires --branch"),
-            (vec!["--path", "/repo", "--agent", "shell"], "shell requires --branch"),
+            (vec!["--path", "/repo", "--agent", "claude", "--label", "x"], "--label requires --branch"),
             (vec!["--branch", "new", "--agent", "claude", "--agent", "codex"], "more than once"),
             (vec!["--branch", "new", "--agent", "claude", "--focus", "--focus"], "more than once"),
             (vec!["--branch", "new", "--agent", "claude", "--typo"], "unknown start option"),

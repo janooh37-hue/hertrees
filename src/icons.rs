@@ -47,9 +47,10 @@ fn has_font_file(directory: &PathBuf) -> bool {
     false
 }
 
-fn detect() -> bool {
+/// The user and system font folders this platform installs fonts into.
+fn font_dirs() -> Vec<PathBuf> {
     let home = PathBuf::from(pyos::path_home());
-    let directories: Vec<PathBuf> = if cfg!(target_os = "macos") {
+    if cfg!(target_os = "macos") {
         vec![home.join("Library/Fonts"), PathBuf::from("/Library/Fonts")]
     } else if cfg!(windows) {
         let local = env_or("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(|| home.join("AppData/Local"));
@@ -58,8 +59,11 @@ fn detect() -> bool {
     } else {
         let data = env_or("XDG_DATA_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".local/share"));
         vec![data.join("fonts"), home.join(".fonts")]
-    };
-    if directories.iter().any(has_font_file) {
+    }
+}
+
+fn detect() -> bool {
+    if font_dirs().iter().any(has_font_file) {
         return true;
     }
     if cfg!(target_os = "linux") {
@@ -115,6 +119,62 @@ pub fn enabled(mode: &Value) -> bool {
     }
 }
 
+/// Glyphs before worktree, space and tab rows, so the three levels read apart.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TreeIcons {
+    pub worktree: &'static str,
+    pub space: &'static str,
+    pub tab: &'static str,
+}
+
+/// Nerd Font: git-branch, window, tab.
+pub const NERD: TreeIcons = TreeIcons { worktree: "\u{f418}", space: "\u{eb7f}", tab: "\u{f04e9}" };
+pub const UNICODE: TreeIcons = TreeIcons { worktree: "⎇", space: "◫", tab: "▭" };
+
+/// Values of the `icons` setting, in the order documented.
+pub const TREE_MODES: &[&str] = &["auto", "nerd", "unicode", "off"];
+
+/// A Nerd Font covers the branch glyph: fontconfig knows, else a font file
+/// named like one. Detected where the popup runs, like the agent logos.
+fn detect_nerd() -> bool {
+    if cfg!(target_os = "linux") {
+        let argv = ["fc-list".to_string(), ":charset=f418".to_string(), "family".to_string()];
+        if let Some(output) = crate::proc::run_capture(&argv, 1.0) {
+            return output.success && !pystr::strip(&String::from_utf8_lossy(&output.stdout)).is_empty();
+        }
+    }
+    font_dirs().iter().any(|directory| {
+        std::fs::read_dir(directory).map(|entries| entries.flatten().any(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            name.contains("NerdFont") || name.contains("Nerd Font")
+        })).unwrap_or(false)
+    })
+}
+
+static NERD_PREFETCH: Mutex<Option<JoinHandle<bool>>> = Mutex::new(None);
+
+/// Start the Nerd Font check while the popup loads the project.
+pub fn prefetch_nerd() {
+    let handle = std::thread::spawn(detect_nerd);
+    if let Ok(mut slot) = NERD_PREFETCH.lock() {
+        *slot = Some(handle);
+    }
+}
+
+/// `icons`: "auto" (default) uses Nerd Font glyphs when one is installed and
+/// plain Unicode otherwise; "nerd" and "unicode" force a set; "off" draws none.
+pub fn tree_icons(mode: Option<&str>) -> Option<TreeIcons> {
+    match mode.unwrap_or("auto") {
+        "off" => None,
+        "nerd" => Some(NERD),
+        "unicode" => Some(UNICODE),
+        _ => {
+            let prefetched = NERD_PREFETCH.lock().ok().and_then(|mut slot| slot.take()).and_then(|handle| handle.join().ok());
+            Some(if prefetched.unwrap_or_else(detect_nerd) { NERD } else { UNICODE })
+        }
+    }
+}
+
 /// The agent kind as the icon and color tables know it.
 pub fn agent_kind(agent: &str) -> String {
     let lowered = pystr::lower(pystr::strip(agent));
@@ -156,6 +216,18 @@ mod tests {
         assert!(!enabled(&s("none")));
         assert!(!enabled(&s("invalid")));
         FONT.with(|f| f.set(None));
+    }
+
+    #[test]
+    fn tree_icon_modes() {
+        assert_eq!(tree_icons(Some("off")), None);
+        assert_eq!(tree_icons(Some("nerd")), Some(NERD));
+        assert_eq!(tree_icons(Some("unicode")), Some(UNICODE));
+        for icons in [NERD, UNICODE] {
+            for glyph in [icons.worktree, icons.space, icons.tab] {
+                assert_eq!(crate::textutil::display_width(glyph), 1, "{glyph:?}");
+            }
+        }
     }
 
     #[test]

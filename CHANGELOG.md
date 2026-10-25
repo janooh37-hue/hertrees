@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.2.5 (2026-10-25)
+
+- Spaces and tabs: each worktree's Herdr space and its tabs are listed under it, with an
+  icon per level (Nerd Font glyphs when installed, else `⎇ ◫ ▭`; `icons` in
+  `config.json`). `→`/`←` show or fold them; `⏎` on a tab focuses it and its agent.
+- Name a new worktree's space with `⇥` after its branch; `alt+r` renames the selected
+  space or tab. Headless: `hertrees start --branch … --label NAME`.
+- `^t` offers a shell as well as agents: a new tab with no agent. Headless:
+  `hertrees start --path … --agent shell`.
+- `^s` on a tab row sends to that tab's agent only.
+- Clean up: `alt+d` closes a worktree's space, removes its checkout and, when GitHub
+  merged the branch at its current commit, deletes the branch; `alt+⇧d` does this for
+  every merged worktree. Refused for the main or current checkout, uncommitted changes
+  and working agents. On a space or tab row, `alt+d` closes just that.
+- The preview shows the branch against the default branch (`origin/main` when fetched):
+  commits ahead and behind, and the changed files with their added and removed lines.
+- `?` lists the keys for the list, the agent picker, the preset manager or the branch
+  input. The list footer is shorter and points to it.
+
 ## 0.2.4 (2026-10-25)
 
 - Add your own text to a preset: `^o` in the agent picker opens the prompt editor with

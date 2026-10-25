@@ -385,6 +385,14 @@ fn usable(wt: &Worktree) -> Result<(), String> {
 }
 
 pub fn start_existing(client: &mut HerdrClient, project: &Project, wt: &Worktree, kind: &str, prompt: Option<&str>, taken_names: &[String], progress: &mut dyn FnMut(&str)) -> Result<Started, String> {
+    let branch = wt.branch.as_deref().unwrap_or("detached");
+    let started = open_tab(client, project, wt, progress)?;
+    launch(client, started, branch, kind, prompt, taken_names, progress)
+}
+
+/// A fresh tab in the worktree's space, opening the space when it is closed:
+/// its pane is a shell until an agent starts in it.
+pub fn open_tab(client: &mut HerdrClient, project: &Project, wt: &Worktree, progress: &mut dyn FnMut(&str)) -> Result<Started, String> {
     usable(wt)?;
     let branch = wt.branch.as_deref().unwrap_or("detached");
     progress(&format!("opening {branch}…"));
@@ -400,19 +408,21 @@ pub fn start_existing(client: &mut HerdrClient, project: &Project, wt: &Worktree
             .and_then(|p| p.get("pane_id").as_str()).map(str::to_owned)
             .ok_or_else(|| "herdr returned no pane for the new tab".to_owned())?;
     }
-    launch(client, started, branch, kind, prompt, taken_names, progress)
+    Ok(started)
 }
 
 /// `prompt` may still hold `{path}` until the new checkout has been created.
-pub fn start_new(client: &mut HerdrClient, project: &Project, branch: &str, base: Option<&str>, kind: &str, prompt: Option<&str>, taken_names: &[String], progress: &mut dyn FnMut(&str)) -> Result<Started, String> {
+/// `label` names the new space; herdr names it after the branch without one.
+#[allow(clippy::too_many_arguments)]
+pub fn start_new(client: &mut HerdrClient, project: &Project, branch: &str, base: Option<&str>, label: Option<&str>, kind: &str, prompt: Option<&str>, taken_names: &[String], progress: &mut dyn FnMut(&str)) -> Result<Started, String> {
     progress(&format!("opening {branch}…"));
-    let started = create_shell(client, project, branch, base)?;
+    let started = create_shell(client, project, branch, base, label)?;
     let prompt = prompt.map(|p| p.replace("{path}", &started.path));
     launch(client, started, branch, kind, prompt.as_deref(), taken_names, progress)
 }
 
 /// New worktree with only its shell: no agent. `focus` afterwards shows it.
-pub fn create_shell(client: &mut HerdrClient, project: &Project, branch: &str, base: Option<&str>) -> Result<Started, String> {
+pub fn create_shell(client: &mut HerdrClient, project: &Project, branch: &str, base: Option<&str>, label: Option<&str>) -> Result<Started, String> {
     validate_branch(&project.repo_root, branch)?;
     let path = crate::project::new_worktree_path(project, branch);
     let path = path.to_str().ok_or("Worktree path is not valid UTF-8")?;
@@ -420,8 +430,64 @@ pub fn create_shell(client: &mut HerdrClient, project: &Project, branch: &str, b
     let mut params = dict(&[("cwd", Value::str(&project.repo_root)), ("branch", Value::str(branch)), ("path", Value::str(path)), ("focus", Value::Bool(false))]);
     let mut argv = vec!["worktree", "create", "--cwd", &project.repo_root, "--branch", branch, "--path", path, "--no-focus"];
     if let Some(base) = base { if let Value::Dict(map) = &mut params { map.insert("base", Value::str(base)); } argv.extend(["--base", base]); }
+    if let Some(label) = label.filter(|label| !label.trim().is_empty()) { if let Value::Dict(map) = &mut params { map.insert("label", Value::str(label)); } argv.extend(["--label", label]); }
     let result = call(client, "worktree.create", params, &argv)?;
     location(&result, &id(&result, "worktree", "path")?)
+}
+
+pub fn rename_space(client: &mut HerdrClient, workspace: &str, label: &str) -> Result<(), String> {
+    call(client, "workspace.rename", dict(&[("workspace_id", Value::str(workspace)), ("label", Value::str(label))]), &["workspace", "rename", workspace, label]).map(|_| ())
+}
+
+pub fn rename_tab(client: &mut HerdrClient, tab: &str, label: &str) -> Result<(), String> {
+    call(client, "tab.rename", dict(&[("tab_id", Value::str(tab)), ("label", Value::str(label))]), &["tab", "rename", tab, label]).map(|_| ())
+}
+
+/// Close a space and everything running in it; the checkout stays. Herdr
+/// groups linked worktrees' spaces under the main checkout's and will not
+/// close that one alone.
+pub fn close_space(client: &mut HerdrClient, workspace: &str) -> Result<(), String> {
+    call(client, "workspace.close", dict(&[("workspace_id", Value::str(workspace))]), &["workspace", "close", workspace]).map(|_| ())
+        .map_err(|error| if error.contains("linked worktree") { "other worktrees' spaces are grouped under this one: close those first".into() } else { error })
+}
+
+pub fn close_tab(client: &mut HerdrClient, tab: &str) -> Result<(), String> {
+    call(client, "tab.close", dict(&[("tab_id", Value::str(tab))]), &["tab", "close", tab]).map(|_| ())
+}
+
+/// Clean up a finished worktree: close its space, remove the checkout, and
+/// with `delete_branch` the local branch too. Never forced: herdr and git both
+/// refuse a checkout with changes. Returns what was done, for the status line.
+pub fn remove_worktree(client: &mut HerdrClient, project: &Project, wt: &Worktree, delete_branch: bool) -> Result<String, String> {
+    if wt.is_main || wt.bare {
+        return Err("the main checkout is never removed".into());
+    }
+    match &wt.open_workspace_id {
+        // Herdr closes the space and removes the checkout in one step.
+        Some(workspace) => {
+            call(client, "worktree.remove", dict(&[("workspace_id", Value::str(workspace)), ("force", Value::Bool(false))]), &["worktree", "remove", "--workspace", workspace])?;
+        }
+        None => git(&project.repo_root, &["worktree", "remove", "--", &wt.path])?,
+    }
+    let title = wt.title();
+    match (&wt.branch, delete_branch) {
+        (Some(branch), true) => match git(&project.repo_root, &["branch", "-D", "--", branch]) {
+            Ok(()) => Ok(format!("removed {title} and its branch")),
+            Err(error) => Ok(format!("removed {title}; branch kept: {error}")),
+        },
+        _ => Ok(format!("removed {title}")),
+    }
+}
+
+fn git(repo_root: &str, args: &[&str]) -> Result<(), String> {
+    let mut argv = vec!["git".to_owned(), "-C".to_owned(), repo_root.to_owned()];
+    argv.extend(args.iter().map(|arg| (*arg).to_owned()));
+    match crate::proc::run(&argv, 30.0) {
+        Ok(output) if output.success => Ok(()),
+        Ok(output) => Err(String::from_utf8_lossy(&output.stderr).lines().next().unwrap_or("git failed").trim_start_matches("fatal: ").to_owned()),
+        Err(crate::proc::RunError::Spawn(e)) => Err(format!("cannot run git: {e}")),
+        Err(crate::proc::RunError::Timeout) => Err("git timed out".into()),
+    }
 }
 
 pub fn focus(client: &mut HerdrClient, started: &Started) -> Result<(), String> {
@@ -479,6 +545,38 @@ mod tests {
         assert_eq!((vars.get("commits"), vars.get("diffstat"), vars.get("pr_body")), (Some("none"), Some("none"), Some("none")));
         fill_lazy(&mut vars, "{commits}", Some("/nonexistent/checkout"), None);
         assert_eq!(vars.get("commits"), Some("unavailable"));
+    }
+
+    #[test]
+    fn removal_without_a_space_uses_git_and_never_forces() {
+        let _guard = crate::testutil::env_lock();
+        let temp = crate::testutil::TempDir::new();
+        let repo = temp.path().join("repo");
+        let repo = repo.to_str().unwrap();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git").args(["-c", "user.name=t", "-c", "user.email=t@t", "-C", repo]).args(args).status().unwrap();
+            assert!(status.success(), "{args:?}");
+        };
+        std::fs::create_dir(repo).unwrap();
+        git(&["init", "-q", "-b", "main"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "init"]);
+        let linked = format!("{repo}/.worktrees/feat");
+        git(&["worktree", "add", "-q", "-b", "feat", &linked]);
+        let project = Project { repo_root: repo.into(), ..Project::default() };
+        let wt = Worktree { path: linked.clone(), branch: Some("feat".into()), ..Worktree::default() };
+        let mut client = HerdrClient::new(Some("/nonexistent/hertrees-test".into()), 0.001, true);
+
+        std::fs::write(format!("{linked}/notes"), "keep me").unwrap();
+        assert!(remove_worktree(&mut client, &project, &wt, true).unwrap_err().contains("untracked"));
+        assert!(std::path::Path::new(&linked).join("notes").exists());
+        std::fs::remove_file(format!("{linked}/notes")).unwrap();
+
+        assert_eq!(remove_worktree(&mut client, &project, &wt, true).unwrap(), "removed feat and its branch");
+        assert!(!std::path::Path::new(&linked).exists());
+        let branches = std::process::Command::new("git").args(["-C", repo, "branch", "--list", "feat"]).output().unwrap();
+        assert!(branches.stdout.is_empty());
+        let main = Worktree { path: repo.into(), branch: Some("main".into()), is_main: true, ..Worktree::default() };
+        assert!(remove_worktree(&mut client, &project, &main, true).is_err());
     }
 
     #[test]

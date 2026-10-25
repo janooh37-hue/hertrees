@@ -101,7 +101,7 @@ pub fn fetch(repo: &GhRepo) -> Result<PrSnapshot, String> {
         format!("{}/{}/{}", repo.host, repo.owner, repo.name),
         "--state".into(), "all".into(), "--limit".into(), LIMIT.to_string(),
         "--json".into(),
-        "number,title,url,state,isDraft,headRefName,headRepositoryOwner,baseRefName,createdAt,mergedAt".into(),
+        "number,title,url,state,isDraft,headRefName,headRefOid,headRepositoryOwner,baseRefName,createdAt,mergedAt".into(),
     ];
     let output = proc::run(&argv, 20.0).map_err(|error| match error {
         RunError::Timeout => "timeout".into(),
@@ -176,6 +176,8 @@ fn parse_prs(value: &Value) -> Option<Vec<PullRequest>> {
             title: row.get("title").as_str()?.into(),
             url: row.get("url").as_str()?.into(),
             head_ref: row.get("headRefName").as_str()?.into(),
+            // Absent from caches written before 0.2.5.
+            head_oid: row.get("headRefOid").as_str().unwrap_or("").into(),
             base_ref: row.get("baseRefName").as_str()?.into(),
             created_at: row.get("createdAt").as_str()?.into(),
         });
@@ -197,6 +199,7 @@ fn encode_snapshot(snapshot: &PrSnapshot) -> Value {
         }));
         row.insert("isDraft", Value::Bool(pr.state == PrState::Draft));
         row.insert("headRefName", Value::str(&pr.head_ref));
+        row.insert("headRefOid", Value::str(&pr.head_oid));
         let mut owner = Map::new();
         owner.insert("login", Value::str(&pr.head_owner));
         row.insert("headRepositoryOwner", Value::Dict(owner));
@@ -351,7 +354,7 @@ mod tests {
     fn pr(number: u64, branch: &str, state: PrState) -> PullRequest {
         PullRequest {
             number, title: "title".into(), url: format!("https://github.com/Owner/repo/pull/{number}"),
-            state, head_ref: branch.into(), head_owner: "oWNER".into(), base_ref: "main".into(),
+            state, head_ref: branch.into(), head_oid: String::new(), head_owner: "oWNER".into(), base_ref: "main".into(),
             created_at: "2026-10-25T00:00:00Z".into(), merged_at: None,
         }
     }

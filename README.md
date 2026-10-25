@@ -16,8 +16,11 @@ any of them or in a brand-new worktree.
 - **Any project:** shows the repository of the pane you opened it from, even inside a linked worktree.
 - **PR state per worktree:** `✓ merged`, `◉ open`, `◐ draft`, `● closed`, `no PR`, or `○ PR ?` when it could not check. `#N` is a clickable link.
 - **Agents:** the left glyph is Herdr's status for the agents in that checkout (`◉` needs you, `◐` working, `●` done, `✓` idle).
-- **New sessions:** start an agent in a worktree, or create a worktree and start one, with a preset first prompt (`blank`, `plan`, `research`, your own, or `custom`).
-- **Local facts:** dirty files `±N`, ahead/behind `↑↓`, last commit age, recent commits.
+- **Spaces and tabs:** each worktree's Herdr space and its tabs sit under it in the list (`⎇` worktree, `◫` space, `▭` tab; Nerd Font glyphs when you have one). Name the space when you create the worktree, rename spaces and tabs with `alt+r`, open a tab with `⏎`.
+- **New sessions:** start an agent in a worktree, or create a worktree and start one, with a preset first prompt (`blank`, `plan`, `research`, your own, or `custom`). `^t` opens a new tab with an agent or a plain shell.
+- **Send to an agent:** `^s` on a tab sends a preset or your own prompt straight to the agent in it.
+- **Clean up:** `alt+d` removes a finished worktree: its space, its checkout, and its branch once GitHub merged it. `alt+⇧d` cleans up every merged one. Nothing with uncommitted changes or a working agent is touched.
+- **Local facts:** dirty files `±N`, ahead/behind `↑↓`, last commit age, recent commits, and in the preview what the branch changed against `main`: commits both ways and the files with their `+`/`−` lines.
 
 ## Quick start
 
@@ -53,10 +56,15 @@ Needs Herdr 0.9.3+ on Linux or macOS, `git`, and an authenticated `gh` for PR st
 |---|---|
 | type | fuzzy search: branch, path, `#123`, PR title, PR state, agent |
 | `↑↓` `^p` `^n` `^k` `^j` `PgUp` `PgDn` | move |
-| `⏎` / click selected row | focus the worktree's workspace, opening it if needed |
-| `^t` | new agent session in the selected worktree |
-| `^s` | send a preset or prompt to an agent already running in the selected worktree |
-| `^x` | new worktree: branch name → agent (or shell) → preset |
+| `⏎` / click selected row | focus the worktree's space (opening it if needed), or the selected tab and its agent |
+| `^t` | new tab in the worktree's space: an agent with a preset, or a shell |
+| `^s` | send a preset or prompt to a running agent; on a tab row, to that tab's agent |
+| `^x` | new worktree: branch name (`⇥` names its space) → agent (or shell) → preset |
+| `→` `←` (empty query) | show or fold a worktree's space and tabs |
+| `alt+r` | rename the selected space or tab |
+| `alt+d` | clean up the selected worktree; on a space or tab row, close it |
+| `alt+⇧d` | clean up every merged worktree that is safe to remove |
+| `?` | the keys for where you are |
 | `^b` / click `#N` | open the PR in the browser |
 | `⇥` `⇧⇥` | scope: everything → no PR → open → draft → merged → closed → agents |
 | `@` (empty query) | agents scope |
@@ -64,6 +72,12 @@ Needs Herdr 0.9.3+ on Linux or macOS, `git`, and an authenticated `gh` for PR st
 | `^l` | next wordmark style, shown at once and saved to `config.json` |
 | `^u` `^w` `^a` `^e` `^d` | clear, delete word, home, end, delete forward |
 | `esc` | back / close |
+
+Cleaning up asks first, then closes the worktree's space, removes the checkout and, only
+when GitHub merged the branch at exactly its current commit, deletes the local branch.
+It refuses the main checkout, the checkout you opened the popup from, one with
+uncommitted changes, and one where an agent is still working; Herdr and git refuse
+uncommitted changes again on their own. Tab names come from the bar; `alt+r` sets your own.
 
 In the agent picker, `⇥` cycles the preset, `⏎` sends it as is, `^o` opens the prompt
 editor to add your own text under it, and `^e` manages presets (`⏎` edits, `^x` creates,
@@ -113,6 +127,10 @@ Everything is optional. Edit `~/.config/herdr/plugins/config/hertrees/config.jso
 - `wordmark`: `"search"` (default, `❯ hertrees │` on the search line), `"pixel"`,
   `"pixel-small"`, `"braille"`, `"sextant"` or `"icon"` (pixel lettering above it), or `"off"`.
   `^l` in the popup steps through them and saves the choice here.
+- `icons`: glyphs before worktree, space and tab rows. `"auto"` (default) uses Nerd Font
+  glyphs when a Nerd Font is installed and `⎇ ◫ ▭` otherwise; `"nerd"` or `"unicode"`
+  forces a set, `"off"` draws none. Set it when the popup runs on another machine than
+  your terminal (SSH), where detection sees the server's fonts.
 - Presets: see [Presets](#presets). The preset manager opens `$VISUAL`, then `$EDITOR`,
   then `nvim` or `vi`.
 - Fonts and icons: everything is plain Unicode by default. For vendor logos before agent

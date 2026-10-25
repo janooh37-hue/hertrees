@@ -7,7 +7,7 @@ use crate::client::HerdrClient;
 use crate::config::{Config, SCOPES};
 use crate::fuzzy::{match_prepared, split_query, Term};
 use crate::keys::{Event, KeyDecoder, MouseKind};
-use crate::model::{AgentHere, GitFacts, PrInfo, PrState, Project, Worktree};
+use crate::model::{AgentHere, GitFacts, PrInfo, PrState, Project, Space, Worktree};
 use crate::paint::Painter;
 use crate::pr::{self, GhRepo, PrSnapshot};
 use crate::presets::{self, Preset};
@@ -20,7 +20,7 @@ use crate::term::Terminal;
 use crate::textutil::{display_width, pad, sanitize, truncate};
 use crate::theme::Theme;
 use crate::wordmark::{self, Style};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -30,6 +30,8 @@ pub const ESC_TIMEOUT: f64 = 0.04;
 pub const STATUS_TTL: f64 = 2.5;
 pub const ERROR_TTL: f64 = 8.0;
 const FACT_WORKERS: usize = 4;
+/// Files the preview's diff lists before "… N more".
+const DIFF_FILES: usize = 8;
 /// Pseudo agent kind: a new worktree with only a shell.
 const SHELL: &str = "shell";
 
@@ -304,9 +306,36 @@ pub enum Target {
     Running(usize),
 }
 
+/// What a list row stands for: a worktree, its space, or one of its tabs
+/// (by position in the space's `tabs`). Rows of one worktree share `Row::item`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Node {
+    Worktree,
+    Space,
+    Tab(usize),
+}
+
+/// A space or tab being renamed (alt+r): its herdr id and current label.
+#[derive(Clone, Debug)]
+enum Rename {
+    Space { id: String, old: String },
+    Tab { id: String, old: String },
+}
+
+/// What alt+d / alt+shift+d asks to confirm.
+#[derive(Clone, Debug)]
+enum Removal {
+    /// Clean up these worktrees: close the space, remove the checkout, delete
+    /// the branch where `delete_branch` says it is safe.
+    Worktrees(Vec<usize>),
+    Space { id: String, label: String },
+    Tab { id: String, label: String },
+}
+
 enum Mode {
     List,
-    Branch(LineEdit),
+    /// New worktree: its branch, and optionally its space's name (⇥ switches).
+    Branch { edit: LineEdit, label: LineEdit, naming: bool },
     Agent { target: Target, edit: LineEdit, kinds: Vec<String>, rows: Vec<usize>, selected: usize, preset: usize },
     /// The prompt editor: the user's text under `preset` (or alone for custom).
     Custom { target: Target, kind: String, edit: TextEdit, preset: usize, recall: Option<(usize, String)>, completion: Option<Completion> },
@@ -314,6 +343,12 @@ enum Mode {
     Fields { target: Target, kind: String, prompt: String, addition: String, names: Vec<String>, values: Vec<String>, edit: LineEdit, back: Box<Mode> },
     Presets { previous: Box<Mode>, edit: LineEdit, rows: Vec<Row>, selected: usize, confirm: Option<String> },
     PresetName { previous: Box<Mode>, action: PresetAction, edit: LineEdit },
+    /// New name for a space or tab.
+    Rename { what: Rename, edit: LineEdit },
+    /// ⏎ goes ahead, anything else keeps it; the list stays visible.
+    Confirm(Removal),
+    /// The keys of the mode it was opened from (?).
+    Help(Box<Mode>),
     Busy(String),
 }
 
@@ -346,12 +381,15 @@ enum Msg {
     Done(Result<Started, String>),
     /// A prompt sent to a running agent: its name and whether delivery waits for it.
     Sent(Result<(String, bool), String>),
+    /// Worktree cleanup finished: one status line, an error when anything failed.
+    Removed(Result<String, String>),
 }
 
 /// Everything one load of a project produces; built off the UI thread.
 pub struct Loaded {
     pub result: Result<(Project, Vec<Worktree>), String>,
     pub agents: Vec<AgentHere>,
+    pub spaces: Option<Vec<Space>>,
     pub gh: Result<GhRepo, String>,
     pub cached: Option<PrSnapshot>,
     pub branch_times: BTreeMap<String, i64>,
@@ -364,6 +402,7 @@ impl Loaded {
             None => Err("no working directory: open the picker from a pane".into()),
         };
         let agents = project::agents(client);
+        let spaces = project::spaces(client);
         let (gh, cached, branch_times) = match &result {
             Ok((project, _)) => {
                 let gh = pr::github_repo(&project.repo_root);
@@ -372,7 +411,7 @@ impl Loaded {
             }
             Err(error) => (Err(error.clone()), None, BTreeMap::new()),
         };
-        Loaded { result, agents, gh, cached, branch_times }
+        Loaded { result, agents, spaces, gh, cached, branch_times }
     }
 }
 
@@ -402,6 +441,14 @@ pub struct Picker {
     load_error: Option<String>,
     pub worktrees: Vec<Worktree>,
     agents: Vec<Vec<AgentHere>>,
+    /// Each worktree's open space, if any.
+    spaces: Vec<Option<Space>>,
+    /// Worktrees whose space and tabs are folded away (←), by path.
+    collapsed: HashSet<String>,
+    /// ^s from a tab row: only that tab's agents are offered.
+    send_tab: Option<String>,
+    /// Space name typed with ^x for the worktree being created; empty: the branch.
+    new_label: String,
     agent_names: Vec<String>,
     gh: Result<GhRepo, String>,
     snapshot: Option<PrSnapshot>,
@@ -414,6 +461,8 @@ pub struct Picker {
     order: Vec<usize>,
     items: Vec<Item>,
     rows: Vec<Row>,
+    /// What each of `rows` stands for.
+    nodes: Vec<Node>,
     query: LineEdit,
     scope: &'static str,
     selected: usize,
@@ -456,6 +505,10 @@ impl Picker {
             load_error: None,
             worktrees: Vec::new(),
             agents: Vec::new(),
+            spaces: Vec::new(),
+            collapsed: HashSet::new(),
+            send_tab: None,
+            new_label: String::new(),
             agent_names: Vec::new(),
             gh: Err(String::new()),
             snapshot: None,
@@ -467,6 +520,7 @@ impl Picker {
             order: Vec::new(),
             items: Vec::new(),
             rows: Vec::new(),
+            nodes: Vec::new(),
             query: LineEdit::default(),
             scope,
             selected: 0,
@@ -495,7 +549,7 @@ impl Picker {
 
     /// Adopt a fresh load: rows, cached PRs, then background fetches.
     fn take(&mut self, loaded: Loaded) {
-        let Loaded { result, agents, gh, cached, branch_times } = loaded;
+        let Loaded { result, agents, spaces, gh, cached, branch_times } = loaded;
         match result {
             Ok((project, worktrees)) => {
                 self.project = Some(project);
@@ -514,6 +568,8 @@ impl Picker {
             self.snapshot = cached;
         }
         self.facts = vec![None; self.worktrees.len()];
+        self.spaces = vec![None; self.worktrees.len()];
+        self.set_spaces(spaces);
         self.set_agents(agents);
         self.order_rows();
         self.classify();
@@ -534,6 +590,16 @@ impl Picker {
             list.sort_by_key(|a| status_rank(&a.status));
         }
         self.agents = by;
+    }
+
+    /// Match spaces to worktrees; a space opened or closed since the load
+    /// updates which workspace ⏎ focuses. None (herdr unreachable) keeps them.
+    fn set_spaces(&mut self, spaces: Option<Vec<Space>>) {
+        let Some(spaces) = spaces else { return };
+        self.spaces = project::spaces_by_worktree(&self.worktrees, &spaces);
+        for (worktree, space) in self.worktrees.iter_mut().zip(&self.spaces) {
+            worktree.open_workspace_id = space.as_ref().map(|space| space.id.clone());
+        }
     }
 
     /// At rest: the main checkout, then branches by their last commit, newest
@@ -581,16 +647,21 @@ impl Picker {
 
     /// Git facts on a few worker threads, rows in display order first.
     fn spawn_facts(&mut self) {
-        let queue: Vec<(usize, String)> =
-            self.order.iter().rev().map(|&i| (i, self.worktrees[i].path.clone())).collect();
+        // The default branch is every other branch's base, not its own.
+        let default = self.base_branch();
+        let queue: Vec<(usize, String, Option<String>)> = self.order.iter().rev().map(|&i| {
+            let wt = &self.worktrees[i];
+            let base = default.clone().filter(|base| wt.branch.as_ref() != Some(base) && !wt.detached);
+            (i, wt.path.clone(), base)
+        }).collect();
         self.pending_facts = queue.len();
         let queue = Arc::new(Mutex::new(queue));
         for _ in 0..FACT_WORKERS.min(self.pending_facts) {
             let queue = queue.clone();
             let tx = self.tx.clone();
             std::thread::spawn(move || loop {
-                let Some((index, path)) = queue.lock().ok().and_then(|mut q| q.pop()) else { return };
-                if tx.send(Msg::Facts(index, project::git_facts(&path))).is_err() {
+                let Some((index, path, base)) = queue.lock().ok().and_then(|mut q| q.pop()) else { return };
+                if tx.send(Msg::Facts(index, project::git_facts(&path, base.as_deref()))).is_err() {
                     return;
                 }
             });
@@ -689,7 +760,43 @@ impl Picker {
                 fields.push(name.clone());
             }
         }
-        Item::new(wt.title(), detail, status, agent, meta, fields)
+        let icon = self.theme.tree_icons.map(|icons| ("muted", icons.worktree));
+        Item::new(wt.title(), detail, status, agent, meta, fields).tree(0, icon)
+    }
+
+    /// A space or tab row under worktree `index`. Not searched: they follow
+    /// their worktree's match.
+    fn child_item(&self, index: usize, node: Node) -> Option<Item> {
+        let space = self.space(index)?;
+        let icons = self.theme.tree_icons;
+        match node {
+            Node::Worktree => None,
+            Node::Space => {
+                let meta = vec![Meta::new("muted", count(space.tabs.len(), "tab"))];
+                let item = Item::new(space.label.clone(), String::new(), String::new(), None, meta, Vec::new());
+                Some(item.tree(1, icons.map(|icons| ("accent", icons.space))))
+            }
+            Node::Tab(position) => {
+                let tab = space.tabs.get(position)?;
+                let agents = self.tab_agents(index, &tab.id);
+                let (status, kind) = match agents.first() {
+                    Some(agent) => (agent.status.clone(), Some(agent.kind.clone())),
+                    None => (String::new(), None),
+                };
+                let mut meta = Vec::new();
+                match agents.as_slice() {
+                    [] => meta.push(Meta::new("unknown", "shell")),
+                    [agent] => meta.push(Meta::new(render::agent_role(Some(&agent.kind)), agent_target(agent))),
+                    many => meta.push(Meta::new("muted", format!("{} agents", many.len()))),
+                }
+                let word = render::status_word(&status);
+                if !word.is_empty() {
+                    meta.push(Meta::new(render::status_role(&status), word));
+                }
+                let item = Item::new(tab.label.clone(), String::new(), status, kind, meta, Vec::new());
+                Some(item.tree(2, icons.map(|icons| ("muted", icons.tab))))
+            }
+        }
     }
 
     fn in_scope(&self, index: usize) -> bool {
@@ -707,7 +814,7 @@ impl Picker {
 
     /// Filter and rank, keeping the selected worktree selected when it survives.
     fn refilter(&mut self) {
-        let keep = self.rows.get(self.selected).map(|r| r.item);
+        let keep = self.rows.get(self.selected).map(|r| (r.item, self.selected_node()));
         let terms: Vec<Term> = split_query(&self.query.text).iter().map(|t| Term::new(t)).collect();
         let mut scored: Vec<(i64, usize, Row)> = Vec::new();
         for (rank, &index) in self.order.iter().enumerate() {
@@ -724,16 +831,61 @@ impl Picker {
             }
         }
         scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-        self.rows = scored.into_iter().map(|(_, _, row)| row).collect();
-        self.selected = keep.and_then(|k| self.rows.iter().position(|r| r.item == k)).unwrap_or(0);
+        let blank = |item| Row { item, positions: Vec::new(), field_positions: BTreeMap::new() };
+        self.rows.clear();
+        self.nodes.clear();
+        // Each worktree, then (unless folded) its space and the space's tabs.
+        for (_, _, row) in scored {
+            let item = row.item;
+            self.rows.push(row);
+            self.nodes.push(Node::Worktree);
+            if self.collapsed.contains(&self.worktrees[item].path) {
+                continue;
+            }
+            if let Some(tabs) = self.space(item).map(|space| space.tabs.len()) {
+                self.rows.push(blank(item));
+                self.nodes.push(Node::Space);
+                for tab in 0..tabs {
+                    self.rows.push(blank(item));
+                    self.nodes.push(Node::Tab(tab));
+                }
+            }
+        }
+        self.selected = keep
+            .and_then(|(item, node)| self.position(item, node).or_else(|| self.position(item, Node::Worktree)))
+            .unwrap_or(0);
         if !terms.is_empty() {
             self.selected = 0;
         }
         self.dirty = true;
     }
 
+    fn space(&self, index: usize) -> Option<&Space> {
+        self.spaces.get(index).and_then(Option::as_ref)
+    }
+
+    fn position(&self, item: usize, node: Node) -> Option<usize> {
+        self.rows.iter().zip(&self.nodes).position(|(row, n)| row.item == item && *n == node)
+    }
+
     fn selected_index(&self) -> Option<usize> {
         self.rows.get(self.selected).map(|r| r.item)
+    }
+
+    fn selected_node(&self) -> Node {
+        self.nodes.get(self.selected).copied().unwrap_or(Node::Worktree)
+    }
+
+    /// The selected tab row's worktree, space and tab position.
+    fn selected_tab(&self) -> Option<(usize, &Space, usize)> {
+        let Node::Tab(tab) = self.selected_node() else { return None };
+        let index = self.selected_index()?;
+        Some((index, self.space(index)?, tab))
+    }
+
+    /// Agents whose pane is in this tab.
+    fn tab_agents(&self, index: usize, tab: &str) -> Vec<&AgentHere> {
+        self.agents[index].iter().filter(|agent| agent.tab_id == tab).collect()
     }
 
     fn flash(&mut self, text: impl Into<String>, role: &'static str) {
@@ -786,6 +938,14 @@ impl Picker {
                     }
                     self.refresh_agents();
                 }
+                Msg::Removed(result) => {
+                    self.mode = Mode::List;
+                    self.reload();
+                    match result {
+                        Ok(text) => self.flash(text, "accent"),
+                        Err(error) => self.flash(error, "blocked"),
+                    }
+                }
                 Msg::Done(Err(error)) => {
                     self.mode = Mode::List;
                     // A failure after `worktree.create` (agent start, prompt) still
@@ -807,12 +967,14 @@ impl Picker {
             return;
         }
         let agents = project::agents(&mut self.client);
-        let before: Vec<Vec<(String, String)>> =
-            self.agents.iter().map(|l| l.iter().map(|a| (a.pane_id.clone(), a.status.clone())).collect()).collect();
+        let spaces = project::spaces(&mut self.client);
+        let summary = |picker: &Picker| -> Vec<Vec<(String, String, String)>> {
+            picker.agents.iter().map(|l| l.iter().map(|a| (a.pane_id.clone(), a.status.clone(), a.tab_id.clone())).collect()).collect()
+        };
+        let before = (summary(self), self.spaces.clone());
+        self.set_spaces(spaces);
         self.set_agents(agents);
-        let after: Vec<Vec<(String, String)>> =
-            self.agents.iter().map(|l| l.iter().map(|a| (a.pane_id.clone(), a.status.clone())).collect()).collect();
-        if before != after {
+        if before != (summary(self), self.spaces.clone()) {
             self.rebuild_items();
         }
     }
@@ -877,6 +1039,16 @@ impl Picker {
             "esc" | "ctrl+c" | "ctrl+g" | "ctrl+q" => return Some(Outcome::Cancel),
             "enter" => {
                 let index = self.selected_index()?;
+                if let Some((index, space, tab)) = self.selected_tab() {
+                    // Straight to the tab, and to its agent when it has one.
+                    let tab = &space.tabs[tab];
+                    let agent = self.tab_agents(index, &tab.id).first().map(|agent| (agent_target(agent), agent.pane_id.clone()));
+                    let (agent, pane_id) = agent.unwrap_or_default();
+                    return Some(Outcome::Started(Started {
+                        workspace_id: space.id.clone(), tab_id: tab.id.clone(), pane_id, agent,
+                        path: self.worktrees[index].path.clone(), prompt_deferred: false,
+                    }));
+                }
                 let wt = &self.worktrees[index];
                 if wt.bare || wt.prunable {
                     self.flash("this checkout cannot be opened", "blocked");
@@ -884,6 +1056,11 @@ impl Picker {
                 }
                 return Some(Outcome::Jump(index));
             }
+            "right" | "alt+right" if name == "alt+right" || self.query.text.is_empty() => self.fold(false),
+            "left" | "alt+left" if name == "alt+left" || self.query.text.is_empty() => self.fold(true),
+            "alt+r" => self.start_rename(),
+            "alt+d" => self.ask_removal(),
+            "alt+D" => self.ask_clean_merged(),
             "up" | "ctrl+p" | "ctrl+k" => self.move_by(-1, true),
             "down" | "ctrl+n" | "ctrl+j" => self.move_by(1, true),
             "tab" => self.cycle_scope(1),
@@ -900,10 +1077,17 @@ impl Picker {
             "ctrl+l" => self.cycle_wordmark(),
             "ctrl+s" => {
                 if let Some(index) = self.selected_index() {
-                    if self.agents.get(index).is_some_and(|agents| !agents.is_empty()) {
-                        self.enter_agent_mode(Target::Running(index));
+                    // From a tab row: that tab's agents only, so one agent is one ⏎.
+                    self.send_tab = self.selected_tab().map(|(_, space, tab)| space.tabs[tab].id.clone());
+                    let none = match &self.send_tab {
+                        Some(tab) => self.tab_agents(index, tab).is_empty(),
+                        None => self.agents.get(index).is_none_or(|agents| agents.is_empty()),
+                    };
+                    if none {
+                        let place = if self.send_tab.is_some() { "tab" } else { "worktree" };
+                        self.flash(format!("no agent is running in this {}: ^t starts one", place), "muted");
                     } else {
-                        self.flash("no agent is running in this worktree: ^t starts one", "muted");
+                        self.enter_agent_mode(Target::Running(index));
                     }
                 }
             }
@@ -919,7 +1103,8 @@ impl Picker {
             }
             "ctrl+x" => {
                 if self.project.is_some() {
-                    self.mode = Mode::Branch(LineEdit::default());
+                    self.new_label.clear();
+                    self.mode = Mode::Branch { edit: LineEdit::default(), label: LineEdit::default(), naming: false };
                     self.dirty = true;
                 }
             }
@@ -943,6 +1128,210 @@ impl Picker {
             }
         }
         None
+    }
+
+    /// ← folds the selected worktree's space and tabs away (from a child row,
+    /// it moves to the worktree first); → shows them again.
+    fn fold(&mut self, fold: bool) {
+        let Some(index) = self.selected_index() else { return };
+        let path = self.worktrees[index].path.clone();
+        if fold && self.selected_node() != Node::Worktree {
+            self.selected = self.position(index, Node::Worktree).unwrap_or(self.selected);
+        }
+        let changed = if fold { self.collapsed.insert(path) } else { self.collapsed.remove(&path) };
+        if changed {
+            self.refilter();
+        } else if !fold && self.space(index).is_none() {
+            self.flash("no open space: ⏎ opens one, ^t adds a tab", "muted");
+        }
+        self.dirty = true;
+    }
+
+    /// alt+r: rename the selected tab, or the space of the selected row.
+    fn start_rename(&mut self) {
+        let Some(index) = self.selected_index() else { return };
+        let what = match (self.selected_tab(), self.space(index)) {
+            (Some((_, space, tab)), _) => Rename::Tab { id: space.tabs[tab].id.clone(), old: space.tabs[tab].label.clone() },
+            (None, Some(space)) => Rename::Space { id: space.id.clone(), old: space.label.clone() },
+            (None, None) => {
+                self.flash("not open in a space yet: ⏎ opens one", "muted");
+                return;
+            }
+        };
+        let old = match &what {
+            Rename::Space { old, .. } | Rename::Tab { old, .. } => old.clone(),
+        };
+        let cursor = char_len(&old);
+        self.mode = Mode::Rename { what, edit: LineEdit { text: old, cursor } };
+        self.status = None;
+        self.dirty = true;
+    }
+
+    fn handle_rename_key(&mut self, name: &str) -> Option<Outcome> {
+        let Mode::Rename { what, edit } = &mut self.mode else { return None };
+        match name {
+            "ctrl+c" | "ctrl+q" => return Some(Outcome::Cancel),
+            "esc" | "ctrl+g" => self.mode = Mode::List,
+            "enter" => {
+                let label = pystr::strip(&edit.text).to_string();
+                if label.is_empty() {
+                    self.flash("type a name", "blocked");
+                    return None;
+                }
+                let result = match what {
+                    Rename::Space { id, .. } => session::rename_space(&mut self.client, id, &label),
+                    Rename::Tab { id, .. } => session::rename_tab(&mut self.client, id, &label),
+                };
+                self.mode = Mode::List;
+                match result {
+                    Ok(()) => self.flash(format!("renamed to “{}”", label), "accent"),
+                    Err(error) => self.flash(error, "blocked"),
+                }
+                self.refresh_agents();
+            }
+            other => {
+                edit.key(other);
+            }
+        }
+        self.dirty = true;
+        None
+    }
+
+    /// Why worktree `index` cannot be cleaned up now, if anything stops it.
+    fn cleanup_blocker(&self, index: usize) -> Option<String> {
+        let wt = &self.worktrees[index];
+        if wt.is_main || wt.bare {
+            return Some("the main checkout stays".into());
+        }
+        if wt.prunable {
+            return Some("its folder is missing: git worktree prune clears it".into());
+        }
+        if self.project.as_ref().is_some_and(|project| project.source_checkout == wt.path) {
+            return Some("you opened the picker from it".into());
+        }
+        if self.agents[index].iter().any(|agent| matches!(agent.status.as_str(), "working" | "blocked")) {
+            return Some("an agent is still working in it".into());
+        }
+        match self.facts[index].as_ref().and_then(|facts| facts.dirty) {
+            None => Some("its git status is still loading".into()),
+            Some(0) => None,
+            Some(dirty) => Some(format!("it has {} uncommitted change{}", dirty, if dirty == 1 { "" } else { "s" })),
+        }
+    }
+
+    /// The branch goes too only when GitHub merged it at exactly this commit:
+    /// anything committed since, or a PR that was closed, keeps the branch.
+    fn deletes_branch(&self, index: usize) -> bool {
+        let wt = &self.worktrees[index];
+        match (&self.prs[index].pr, self.prs[index].state) {
+            (Some(pr), PrState::Merged) => !pr.head_oid.is_empty() && pr.head_oid == wt.head,
+            _ => false,
+        }
+    }
+
+    /// alt+d: clean up the worktree, or close the selected space or tab.
+    fn ask_removal(&mut self) {
+        let Some(index) = self.selected_index() else { return };
+        let removal = match (self.selected_node(), self.space(index)) {
+            (Node::Tab(tab), Some(space)) => Removal::Tab { id: space.tabs[tab].id.clone(), label: space.tabs[tab].label.clone() },
+            (Node::Space, Some(space)) => Removal::Space { id: space.id.clone(), label: space.label.clone() },
+            _ => match self.cleanup_blocker(index) {
+                Some(reason) => {
+                    self.flash(format!("{} stays: {}", self.worktrees[index].title(), reason), "blocked");
+                    return;
+                }
+                None => Removal::Worktrees(vec![index]),
+            },
+        };
+        self.mode = Mode::Confirm(removal);
+        self.status = None;
+        self.dirty = true;
+    }
+
+    /// alt+shift+d: every merged worktree that is safe to clean up.
+    fn ask_clean_merged(&mut self) {
+        let merged: Vec<usize> = (0..self.worktrees.len()).filter(|&i| self.prs[i].state == PrState::Merged).collect();
+        let ready: Vec<usize> = merged.iter().copied().filter(|&i| self.cleanup_blocker(i).is_none()).collect();
+        if ready.is_empty() {
+            let text = if merged.is_empty() { "no merged worktrees to clean up".to_string() } else { format!("{} merged, none ready: alt+d on one says why", merged.len()) };
+            self.flash(text, "muted");
+            return;
+        }
+        self.mode = Mode::Confirm(Removal::Worktrees(ready));
+        self.status = None;
+        self.dirty = true;
+    }
+
+    /// (verb, what) for the confirmation line.
+    fn removal_question(&self, removal: &Removal) -> (&'static str, String) {
+        match removal {
+            Removal::Worktrees(list) if list.len() == 1 => {
+                let index = list[0];
+                let space = self.space(index).is_some();
+                let what = match (space, self.deletes_branch(index)) {
+                    (true, true) => "checkout, space and branch",
+                    (false, true) => "checkout and branch",
+                    (true, false) => "checkout and space; branch kept",
+                    (false, false) => "checkout; branch kept",
+                };
+                ("clean up", format!("{} ({})", self.worktrees[index].title(), what))
+            }
+            Removal::Worktrees(list) => ("clean up", format!("{} merged worktrees", list.len())),
+            Removal::Space { label, .. } => ("close space", label.clone()),
+            Removal::Tab { label, .. } => ("close tab", label.clone()),
+        }
+    }
+
+    fn handle_confirm_key(&mut self, name: &str) -> Option<Outcome> {
+        let Mode::Confirm(removal) = std::mem::replace(&mut self.mode, Mode::List) else { return None };
+        self.dirty = true;
+        match name {
+            "ctrl+c" | "ctrl+q" => return Some(Outcome::Cancel),
+            "enter" => {}
+            _ => return None,
+        }
+        let closed = match removal {
+            Removal::Space { id, label } => session::close_space(&mut self.client, &id).map(|()| format!("closed space “{}”", label)),
+            Removal::Tab { id, label } => session::close_tab(&mut self.client, &id).map(|()| format!("closed tab “{}”", label)),
+            Removal::Worktrees(list) => {
+                self.remove_worktrees(list);
+                return None;
+            }
+        };
+        match closed {
+            Ok(text) => self.flash(text, "accent"),
+            Err(error) => self.flash(error, "blocked"),
+        }
+        self.refresh_agents();
+        None
+    }
+
+    /// Clean up on a thread: removing a checkout can take a while.
+    fn remove_worktrees(&mut self, list: Vec<usize>) {
+        let Some(project) = self.project.clone() else { return };
+        let jobs: Vec<(Worktree, bool)> = list.iter().map(|&i| (self.worktrees[i].clone(), self.deletes_branch(i))).collect();
+        let mut client = self.client.clone();
+        let tx = self.tx.clone();
+        self.mode = Mode::Busy(match jobs.as_slice() {
+            [(wt, _)] => format!("cleaning up {}…", wt.title()),
+            many => format!("cleaning up {} worktrees…", many.len()),
+        });
+        std::thread::spawn(move || {
+            let (mut done, mut failed) = (Vec::new(), Vec::new());
+            for (wt, delete_branch) in &jobs {
+                match session::remove_worktree(&mut client, &project, wt, *delete_branch) {
+                    Ok(text) => done.push(text),
+                    Err(error) => failed.push(format!("{}: {}", wt.title(), error)),
+                }
+            }
+            let result = match (done.len(), failed.is_empty()) {
+                (1, true) => Ok(done.remove(0)),
+                (n, true) => Ok(format!("cleaned up {} worktrees", n)),
+                (0, false) => Err(failed.join(" · ")),
+                (n, false) => Err(format!("cleaned up {}; kept {}", n, failed.join(" · "))),
+            };
+            let _ = tx.send(Msg::Removed(result));
+        });
     }
 
     /// ^l: the next wordmark style, drawn at once and saved to config.json.
@@ -978,7 +1367,10 @@ impl Picker {
 
     fn enter_agent_mode(&mut self, target: Target) {
         if let Target::Running(index) = target {
-            let kinds: Vec<String> = self.agents[index].iter().map(agent_target).collect();
+            let tab = self.send_tab.clone();
+            let kinds: Vec<String> = self.agents[index].iter()
+                .filter(|agent| tab.as_ref().is_none_or(|tab| &agent.tab_id == tab))
+                .map(agent_target).collect();
             let rows = (0..kinds.len()).collect();
             self.mode = Mode::Agent { target, edit: LineEdit::default(), kinds, rows, selected: 0, preset: 0 };
             self.dirty = true;
@@ -991,13 +1383,7 @@ impl Picker {
                 kinds.insert(0, kind);
             }
         }
-        if matches!(target, Target::New(_)) {
-            kinds.push(SHELL.to_string());
-        }
-        if kinds.is_empty() {
-            self.flash("no supported agent found on PATH", "blocked");
-            return;
-        }
+        kinds.push(SHELL.to_string());
         let rows = (0..kinds.len()).collect();
         self.mode = Mode::Agent { target, edit: LineEdit::default(), kinds, rows, selected: 0, preset: 0 };
         self.dirty = true;
@@ -1230,11 +1616,13 @@ impl Picker {
     }
 
     fn handle_branch_key(&mut self, name: &str) -> Option<Outcome> {
-        let Mode::Branch(edit) = &mut self.mode else { return None };
+        let Mode::Branch { edit, label, naming } = &mut self.mode else { return None };
         match name {
             "ctrl+c" | "ctrl+q" => return Some(Outcome::Cancel),
             "esc" | "ctrl+g" => self.mode = Mode::List,
+            "tab" | "shift+tab" => *naming = !*naming,
             "enter" => {
+                self.new_label = pystr::strip(&label.text).to_string();
                 let branch = pystr::strip(&edit.text).to_string();
                 if branch.is_empty() {
                     return None;
@@ -1252,7 +1640,7 @@ impl Picker {
                 self.enter_agent_mode(Target::New(branch));
             }
             other => {
-                edit.key(other);
+                if *naming { label.key(other) } else { edit.key(other) };
             }
         }
         self.dirty = true;
@@ -1274,8 +1662,9 @@ impl Picker {
             "esc" | "ctrl+g" => {
                 self.mode = match target {
                     Target::New(branch) => {
-                        let len = char_len(branch);
-                        Mode::Branch(LineEdit { text: branch.clone(), cursor: len })
+                        let (len, label) = (char_len(branch), self.new_label.clone());
+                        let label = LineEdit { cursor: char_len(&label), text: label };
+                        Mode::Branch { edit: LineEdit { text: branch.clone(), cursor: len }, label, naming: false }
                     }
                     Target::Existing(_) | Target::Running(_) => Mode::List,
                 };
@@ -1483,6 +1872,7 @@ impl Picker {
             Target::New(_) => None,
         };
         let taken = self.agent_names.clone();
+        let label = Some(self.new_label.clone()).filter(|label| !label.is_empty());
         let mut client = self.client.clone();
         let tx = self.tx.clone();
         self.mode = Mode::Busy(match target {
@@ -1504,10 +1894,11 @@ impl Picker {
             };
             let prompt = if prompt.is_empty() { None } else { Some(prompt.as_str()) };
             let result = match (&target, worktree) {
-                (Target::New(branch), _) if kind == SHELL => session::create_shell(&mut client, &project, branch, base.as_deref()),
+                (Target::New(branch), _) if kind == SHELL => session::create_shell(&mut client, &project, branch, base.as_deref(), label.as_deref()),
                 (Target::New(branch), _) => {
-                    session::start_new(&mut client, &project, branch, base.as_deref(), &kind, prompt, &taken, &mut progress)
+                    session::start_new(&mut client, &project, branch, base.as_deref(), label.as_deref(), &kind, prompt, &taken, &mut progress)
                 }
+                (Target::Existing(_), Some(wt)) if kind == SHELL => session::open_tab(&mut client, &project, &wt, &mut progress),
                 (Target::Existing(_), Some(wt)) => {
                     session::start_existing(&mut client, &project, &wt, &kind, prompt, &taken, &mut progress)
                 }
@@ -1519,6 +1910,11 @@ impl Picker {
 
     fn insert(&mut self, text: &str, pasted: bool) {
         match &mut self.mode {
+            Mode::List | Mode::Agent { .. } | Mode::Presets { .. } | Mode::Branch { naming: false, .. } if text == "?" && !pasted => {
+                let back = std::mem::replace(&mut self.mode, Mode::List);
+                self.mode = Mode::Help(Box::new(back));
+                self.status = None;
+            }
             Mode::List => {
                 if self.query.text.is_empty() && text == "@" {
                     self.scope = "agents";
@@ -1530,7 +1926,10 @@ impl Picker {
                     self.refilter();
                 }
             }
-            Mode::Branch(edit) => {
+            Mode::Branch { label, naming: true, .. } => {
+                label.insert(text, pasted);
+            }
+            Mode::Branch { edit, .. } => {
                 // Branch names never hold spaces: type them as dashes.
                 let text = text.replace(' ', "-");
                 edit.insert(&text, pasted);
@@ -1556,10 +1955,19 @@ impl Picker {
                     self.presets_refilter();
                 }
             }
-            Mode::PresetName { edit, .. } => {
+            Mode::PresetName { edit, .. } | Mode::Rename { edit, .. } => {
                 edit.insert(text, pasted);
             }
+            Mode::Confirm(_) => self.mode = Mode::List,
+            Mode::Help(_) => self.close_help(),
             Mode::Busy(_) => return,
+        }
+        self.dirty = true;
+    }
+
+    fn close_help(&mut self) {
+        if let Mode::Help(back) = std::mem::replace(&mut self.mode, Mode::List) {
+            self.mode = *back;
         }
         self.dirty = true;
     }
@@ -1630,12 +2038,21 @@ impl Picker {
             let found = match event {
                 Event::Key(name) => match &self.mode {
                     Mode::List => self.handle_list_key(name),
-                    Mode::Branch(_) => self.handle_branch_key(name),
+                    Mode::Branch { .. } => self.handle_branch_key(name),
                     Mode::Agent { .. } => self.handle_agent_key(name),
                     Mode::Custom { .. } => self.handle_custom_key(name),
                     Mode::Fields { .. } => self.handle_fields_key(name),
                     Mode::Presets { .. } => self.handle_presets_key(name),
                     Mode::PresetName { .. } => self.handle_preset_name_key(name),
+                    Mode::Rename { .. } => self.handle_rename_key(name),
+                    Mode::Confirm(_) => self.handle_confirm_key(name),
+                    Mode::Help(_) => {
+                        if matches!(name.as_str(), "ctrl+c" | "ctrl+q") {
+                            return Some(Outcome::Cancel);
+                        }
+                        self.close_help();
+                        None
+                    }
                     Mode::Busy(_) => None,
                 },
                 Event::Text(text) => {
@@ -1722,7 +2139,15 @@ impl Picker {
     fn input_line(&self, layout: &Layout, wordmark: Style) -> String {
         let width = layout.inner_width;
         match &self.mode {
-            Mode::List | Mode::Busy(_) => render::render_search(
+            Mode::Rename { what, edit } => {
+                let (prompt, placeholder) = match what {
+                    Rename::Space { old, .. } => ("rename space ❯", format!("new name for “{}”", old)),
+                    Rename::Tab { old, .. } => ("rename tab ❯", format!("new name for “{}”", old)),
+                };
+                render::render_input(&self.theme, &edit.text, edit.cursor, width, &placeholder, "⏎ save · esc keep", prompt)
+            }
+            Mode::Help(_) => render::render_status(&self.theme, width, "accent", "keys", "any key closes"),
+            Mode::List | Mode::Busy(_) | Mode::Confirm(_) => render::render_search(
                 &self.theme,
                 &self.query.text,
                 self.query.cursor,
@@ -1732,10 +2157,16 @@ impl Picker {
                 scope_chip(self.scope),
                 wordmark == Style::Search,
             ),
-            Mode::Branch(edit) => {
+            Mode::Branch { edit, label, naming } => {
                 let base = self.base_branch().unwrap_or_else(|| "HEAD".into());
+                if *naming {
+                    let branch = pystr::strip(&edit.text);
+                    let placeholder = if branch.is_empty() { "name for the space".to_string() } else { format!("name for the space — default {}", branch) };
+                    return render::render_input(&self.theme, &label.text, label.cursor, width, &placeholder, "⇥ branch · ⏎ next", "space ❯");
+                }
                 let placeholder = format!("branch name for the new worktree — from {}", base);
-                render::render_input(&self.theme, &edit.text, edit.cursor, width, &placeholder, "⏎ next · esc back", "new worktree ❯")
+                let chip = if label.text.trim().is_empty() { "⇥ name the space · ⏎ next".to_string() } else { format!("space: {} · ⏎ next", label.text.trim()) };
+                render::render_input(&self.theme, &edit.text, edit.cursor, width, &placeholder, &chip, "new worktree ❯")
             }
             Mode::Agent { target, edit, preset, .. } => {
                 let (verb, prompt) = if matches!(target, Target::Running(_)) { ("send to an agent", "send ❯") } else { ("start an agent", "agent ❯") };
@@ -1853,6 +2284,14 @@ impl Picker {
         if let Mode::Custom { .. } | Mode::Fields { .. } = &self.mode {
             return self.editor_rows(layout);
         }
+        if let Mode::Help(back) = &self.mode {
+            let rows = help_rows(back);
+            let key_width = rows.iter().map(|(key, _)| display_width(key)).max().unwrap_or(0);
+            return rows.iter().map(|(key, about)| {
+                let line = [Segment::bold("accent", format!("  {}  ", pad(key, key_width as isize)), true), Segment::new("text", *about)];
+                truncate(&render::segments_to_text(&self.theme, &line, ""), layout.list_width)
+            }).collect();
+        }
         let agent_rows: Option<(Vec<Item>, usize)> = match &self.mode {
             Mode::Agent { target, kinds, rows, selected, .. } => {
                 let items = rows.iter().map(|&i| self.agent_item(target, &kinds[i])).collect();
@@ -1885,7 +2324,9 @@ impl Picker {
                 String::new()
             } else {
                 let row = &self.rows[position];
-                let rendered = render::render_row(&self.theme, &self.items[row.item], row, content_width, position == self.selected);
+                let child = self.child_item(row.item, self.nodes[position]);
+                let item = child.as_ref().unwrap_or(&self.items[row.item]);
+                let rendered = render::render_row(&self.theme, item, row, content_width, position == self.selected);
                 if let Some((start, end, url)) = rendered.link {
                     // Rows start after the one-cell gutter.
                     self.links.insert(layout.list_top + index, (start + 1, end + 1, url));
@@ -1912,7 +2353,8 @@ impl Picker {
         if self.config.default_agent.as_deref() == Some(kind) {
             meta.push(Meta::new("accent", "default"));
         }
-        let (agent, detail) = if kind == SHELL { (None, "no agent, just the worktree") } else { (Some(kind.to_string()), "") };
+        let shell = if matches!(target, Target::New(_)) { "no agent, just the worktree" } else { "a new tab with no agent" };
+        let (agent, detail) = if kind == SHELL { (None, shell) } else { (Some(kind.to_string()), "") };
         Item::new(kind.to_string(), detail.to_string(), String::new(), agent, meta, Vec::new())
     }
 
@@ -1956,11 +2398,16 @@ impl Picker {
                 };
                 self.session_preview(target, kind, preset, Some(session::expand_prompt(prompt, &typed)), width, height)
             }
-            Mode::Branch(edit) => {
+            Mode::Branch { edit, label, .. } => {
                 let base = self.base_branch().unwrap_or_else(|| "HEAD".into());
                 let branch = pystr::strip(&edit.text);
+                let space = match pystr::strip(&label.text) {
+                    "" => if branch.is_empty() { "named after the branch" } else { branch },
+                    typed => typed,
+                };
                 let body = vec![
                     vec![Segment::new("muted", format!("git worktree add -b {} … {}", if branch.is_empty() { "<branch>" } else { branch }, base))],
+                    vec![Segment::new("muted", "space  "), Segment::new("accent", space.to_string())],
                     Vec::new(),
                     vec![Segment::new("muted", "next: pick an agent and a preset,")],
                     vec![Segment::new("muted", "or shell for just the checkout")],
@@ -1995,7 +2442,8 @@ impl Picker {
         };
         body.push(Vec::new());
         if kind == SHELL {
-            body.push(vec![Segment::new("muted", "creates the worktree and focuses its shell")]);
+            let what = if matches!(target, Target::New(_)) { "creates the worktree and focuses its shell" } else { "opens a tab with a shell and focuses it" };
+            body.push(vec![Segment::new("muted", what)]);
         } else {
             body.push(vec![Segment::new("muted", "preset  "), Segment::bold("accent", preset, true)]);
             let text = match template {
@@ -2171,6 +2619,10 @@ impl Picker {
                     body.push(Vec::new());
                 }
                 self.agent_lines(index, &mut body);
+                if let Some(diff) = &facts.base {
+                    body.push(Vec::new());
+                    diff_lines(diff, &mut body);
+                }
                 if !facts.recent_commits.is_empty() {
                     body.push(Vec::new());
                     for commit in &facts.recent_commits {
@@ -2213,13 +2665,17 @@ impl Picker {
         if let Mode::Presets { confirm: Some(name), .. } = &self.mode {
             return render::render_confirm(&self.theme, width, "delete", name, "⏎ delete · esc keep");
         }
+        if let Mode::Confirm(removal) = &self.mode {
+            let (verb, what) = self.removal_question(removal);
+            return render::render_confirm(&self.theme, width, verb, &what, "⏎ yes · esc keep");
+        }
         if let Some((text, role, until)) = &self.status {
             if monotonic() < *until {
                 return render::render_status(&self.theme, width, role, text, "");
             }
         }
         let (hints, counter): (Vec<(&str, &str)>, String) = match &self.mode {
-            Mode::Branch(_) => (vec![("⏎", "next"), ("esc", "back"), ("^u", "clear")], "new worktree".into()),
+            Mode::Branch { .. } => (vec![("⏎", "next"), ("⇥", "space name"), ("esc", "back"), ("^u", "clear")], "new worktree".into()),
             Mode::Agent { rows, .. } => {
                 (vec![("↑↓", "agent"), ("⇥", "preset"), ("⏎", "start"), ("^o", "add text"), ("^e", "presets"), ("esc", "back")], count(rows.len(), "agent"))
             }
@@ -2229,6 +2685,8 @@ impl Picker {
             ),
             Mode::Fields { names, values, .. } => (vec![("⏎", "next"), ("esc", "back"), ("^u", "clear")], format!("field {}/{}", values.len() + 1, names.len())),
             Mode::Presets { rows, .. } => (vec![("⏎", "edit"), ("^x", "new"), ("^r", "rename"), ("⌦", "delete"), ("esc", "back")], count(rows.len(), "preset")),
+            Mode::Rename { .. } => (vec![("⏎", "save"), ("esc", "keep"), ("^u", "clear")], "renaming".into()),
+            Mode::Help(_) => (vec![("esc", "back")], "keys".into()),
             Mode::PresetName { action, .. } => (vec![("⏎", "save"), ("esc", "keep"), ("^u", "clear")],
                 match action { PresetAction::Rename(_) => "renaming", PresetAction::New => "new preset", PresetAction::Save(_) => "saving preset" }.into()),
             _ => {
@@ -2238,19 +2696,18 @@ impl Picker {
                     vec![
                         ("↑↓", "move"),
                         ("⏎", "open"),
-                        ("^t", "agent"),
+                        ("^t", "tab"),
                         ("^s", "send"),
                         ("^x", "new"),
-                        ("^b", "PR"),
+                        ("alt+r", "rename"),
+                        ("alt+d", "clean"),
                         ("⇥", "scope"),
-                        ("^r", "refresh"),
-                        ("^o", "preview"),
-                        ("^l", "wordmark"),
+                        ("?", "keys"),
                         ("esc", "quit"),
                     ]
                 };
                 let total = self.items.len();
-                let shown = self.rows.len();
+                let shown = self.nodes.iter().filter(|node| **node == Node::Worktree).count();
                 let mut counter = if shown != total { format!("{}/{}", shown, total) } else { total.to_string() };
                 if self.fetching {
                     counter = format!("PRs… · {}", counter);
@@ -2322,6 +2779,93 @@ impl Picker {
             deadline = deadline.min(*until);
         }
         (deadline - now).max(0.01)
+    }
+}
+
+/// The preview's diff against the base branch: counts, then the files with
+/// the most lines changed first.
+fn diff_lines(diff: &crate::model::BaseDiff, body: &mut Vec<Vec<Segment>>) {
+    let (added, deleted) = diff.files.iter().fold((0, 0), |(a, d), (_, add, del)| (a + add.unwrap_or(0), d + del.unwrap_or(0)));
+    let mut head = vec![Segment::new("muted", "vs "), Segment::new("text", diff.base.clone()), Segment::new("muted", format!("  ↑{} ↓{}", diff.ahead, diff.behind))];
+    if diff.files.is_empty() {
+        head.push(Segment::new("muted", " · no changes"));
+        body.push(head);
+        return;
+    }
+    head.push(Segment::new("muted", format!(" · {} · ", count(diff.files.len(), "file"))));
+    head.push(Segment::new("idle", format!("+{}", added)));
+    head.push(Segment::new("muted", " "));
+    head.push(Segment::new("blocked", format!("−{}", deleted)));
+    body.push(head);
+    let mut files: Vec<_> = diff.files.iter().collect();
+    files.sort_by_key(|(_, add, del)| std::cmp::Reverse(add.unwrap_or(0) + del.unwrap_or(0)));
+    let width = files.iter().map(|(_, add, del)| match (add, del) {
+        (Some(a), Some(d)) => format!("+{} −{}", a, d).chars().count(),
+        _ => 3,
+    }).max().unwrap_or(0);
+    let hidden = files.len().saturating_sub(DIFF_FILES);
+    for (path, add, del) in files.into_iter().take(DIFF_FILES) {
+        let counts = match (add, del) {
+            (Some(a), Some(d)) => vec![Segment::new("idle", format!("+{}", a)), Segment::new("blocked", format!(" −{}", d))],
+            _ => vec![Segment::new("muted", "bin")],
+        };
+        let used: usize = counts.iter().map(|segment| segment.text.chars().count()).sum();
+        let mut line = vec![Segment::new("", "  ")];
+        line.extend(counts);
+        line.push(Segment::new("", " ".repeat(width - used + 2)));
+        line.push(Segment::new("text", path.clone()));
+        body.push(line);
+    }
+    if hidden > 0 {
+        body.push(vec![Segment::new("unknown", format!("  … {} more file{}", hidden, if hidden == 1 { "" } else { "s" }))]);
+    }
+}
+
+/// The ? list: keys of the mode it was opened from, one per line.
+fn help_rows(mode: &Mode) -> Vec<(&'static str, &'static str)> {
+    match mode {
+        Mode::Agent { .. } => vec![
+            ("↑↓", "choose the agent (or shell: a tab with no agent)"),
+            ("type", "filter agents"),
+            ("⇥ ⇧⇥", "choose the preset"),
+            ("⏎", "start, or send, with the preset as it is"),
+            ("^o", "open the prompt editor to add your own text"),
+            ("^e", "manage presets"),
+            ("esc", "back"),
+        ],
+        Mode::Presets { .. } => vec![
+            ("⏎", "edit the preset in your editor"),
+            ("^x", "new preset"),
+            ("^r", "rename"),
+            ("⌦ ^d", "delete"),
+            ("type", "filter presets"),
+            ("^o", "toggle the preview"),
+            ("esc", "back"),
+        ],
+        Mode::Branch { .. } => vec![
+            ("type", "the new branch (spaces become dashes)"),
+            ("⇥", "switch to the space's name, and back"),
+            ("⏎", "next: agent or shell, then preset"),
+            ("esc", "back"),
+        ],
+        _ => vec![
+            ("⏎", "open: the worktree's space, or that tab and its agent"),
+            ("^t", "new tab in the space: an agent, or a shell"),
+            ("^s", "send a preset or prompt; on a tab, to its agent"),
+            ("^x", "new worktree: branch, space name (⇥), agent, preset"),
+            ("→ ←", "show or fold a worktree's space and tabs"),
+            ("alt+r", "rename the space or tab"),
+            ("alt+d", "clean up the worktree · close the space or tab"),
+            ("alt+⇧d", "clean up every merged worktree"),
+            ("^b", "open the pull request in the browser"),
+            ("⇥ ⇧⇥", "scope: everything, no PR, open, draft, merged, closed, agents"),
+            ("@", "agents scope (empty search)"),
+            ("^r", "reload worktrees, spaces, agents and PRs"),
+            ("^o", "toggle the preview"),
+            ("^l", "next wordmark style"),
+            ("^u ^w", "clear the search · delete a word"),
+            ("esc", "close"),
+        ],
     }
 }
 
@@ -2471,7 +3015,7 @@ mod tests {
     fn preset_picker(config_dir: &Path, env: &mut EnvVars) -> Picker {
         env.set("HERDR_PLUGIN_CONFIG_DIR", config_dir);
         let loaded = Loaded {
-            result: Err("test without a project".into()), agents: Vec::new(), gh: Err("no remote".into()),
+            result: Err("test without a project".into()), agents: Vec::new(), spaces: None, gh: Err("no remote".into()),
             cached: None, branch_times: BTreeMap::new(),
         };
         let mut picker = Picker::new(HerdrClient::new(Some("/nonexistent/hertrees-test".into()), 0.001, true),
@@ -2855,7 +3399,7 @@ mod tests {
         picker.rebuild_items();
         key(&mut picker, "ctrl+s");
         assert!(picker.status.as_ref().unwrap().0.contains("no agent is running"));
-        picker.agents = vec![vec![AgentHere { name: Some("claude-main".into()), kind: "claude".into(), status: "working".into(), cwd: "/repo".into(), pane_id: "p1".into() }]];
+        picker.agents = vec![vec![AgentHere { name: Some("claude-main".into()), kind: "claude".into(), status: "working".into(), cwd: "/repo".into(), pane_id: "p1".into(), tab_id: "w1:t1".into() }]];
         key(&mut picker, "ctrl+s");
         let Mode::Agent { target: Target::Running(0), kinds, .. } = &picker.mode else { panic!("not sending") };
         assert_eq!(kinds, &["claude-main"]);
@@ -2863,6 +3407,246 @@ mod tests {
         assert!(screen.contains("send ❯") && screen.contains("claude-main"), "{screen}");
         key(&mut picker, "ctrl+o");
         assert!(matches!(&picker.mode, Mode::Custom { target: Target::Running(0), kind, .. } if kind == "claude-main"));
+    }
+
+    /// A project with main and one linked worktree whose space has two tabs:
+    /// claude working in the first, a shell in the second.
+    fn tree_picker(tmp: &Path, env: &mut EnvVars) -> Picker {
+        let mut picker = preset_picker(tmp, env);
+        picker.project = Some(Project { repo_root: "/repo".into(), repo_name: "repo".into(), source_checkout: "/repo".into(), default_branch: Some("main".into()) });
+        picker.worktrees = vec![
+            Worktree { path: "/repo".into(), branch: Some("main".into()), is_main: true, head: "aaa".into(), ..Worktree::default() },
+            Worktree { path: "/repo/.worktrees/feat".into(), branch: Some("feat".into()), head: "bbb".into(), open_workspace_id: Some("w2".into()), ..Worktree::default() },
+        ];
+        picker.prs = vec![PrInfo::unknown("test"), PrInfo::unknown("test")];
+        picker.facts = vec![Some(GitFacts { dirty: Some(0), ..GitFacts::default() }); 2];
+        picker.spaces = vec![None, Some(Space {
+            id: "w2".into(), label: "cache work".into(), checkout: "/repo/.worktrees/feat".into(),
+            tabs: vec![
+                crate::model::Tab { id: "w2:t1".into(), label: "1 · feat › claude".into(), focused: false },
+                crate::model::Tab { id: "w2:t2".into(), label: "2 · feat › zsh".into(), focused: false },
+            ],
+        })];
+        picker.agents = vec![Vec::new(), vec![AgentHere {
+            name: Some("claude-feat".into()), kind: "claude".into(), status: "working".into(),
+            cwd: "/repo/.worktrees/feat".into(), pane_id: "w2:p1".into(), tab_id: "w2:t1".into(),
+        }]];
+        picker.order = vec![0, 1];
+        picker.mode = Mode::List;
+        picker.rebuild_items();
+        picker
+    }
+
+    #[test]
+    fn spaces_and_tabs_sit_under_their_worktree_and_fold() {
+        let _lock = env_lock();
+        let tmp = TempDir::new();
+        let mut env = EnvVars::new();
+        let mut picker = tree_picker(tmp.path(), &mut env);
+        picker.theme.tree_icons = Some(crate::icons::UNICODE);
+        picker.rebuild_items();
+        assert_eq!(picker.nodes, [Node::Worktree, Node::Worktree, Node::Space, Node::Tab(0), Node::Tab(1)]);
+        let screen = plain(&mut picker, 120, 20).join("\n");
+        assert!(screen.contains("⎇ ") && screen.contains("◫ cache work") && screen.contains("▭ ◐ 1 · feat › claude"), "{screen}");
+        assert!(screen.contains("2 tabs") && screen.contains("shell"), "{screen}");
+        assert!(screen.trim_end().ends_with(" 2"), "the counter counts worktrees, not rows: {screen}");
+        // ← on a tab folds its worktree and selects it; → shows the tree again.
+        picker.selected = 4;
+        key(&mut picker, "left");
+        assert_eq!(picker.nodes, [Node::Worktree, Node::Worktree]);
+        assert_eq!(picker.selected, 1);
+        key(&mut picker, "right");
+        assert_eq!(picker.nodes.len(), 5);
+        // With a query, ← and → move the cursor instead.
+        picker.insert("fe", false);
+        key(&mut picker, "left");
+        assert_eq!((picker.query.cursor, picker.nodes.len()), (1, 4));
+    }
+
+    #[test]
+    fn the_preview_shows_the_diff_against_base() {
+        let _lock = env_lock();
+        let tmp = TempDir::new();
+        let mut env = EnvVars::new();
+        let mut picker = tree_picker(tmp.path(), &mut env);
+        let mut files: Vec<_> = (0..10).map(|n| (format!("src/f{n}.rs"), Some(n), Some(1))).collect();
+        files.push(("logo.png".into(), None, None));
+        picker.facts[1] = Some(GitFacts { dirty: Some(0), base: Some(crate::model::BaseDiff { base: "origin/main".into(), ahead: 3, behind: 1, files }), ..GitFacts::default() });
+        let preview = crate::textutil::strip_ansi(&picker.worktree_preview(1, 56, 30).join("\n"));
+        assert!(preview.contains("vs origin/main  ↑3 ↓1 · 11 files · +45 −10"), "{preview}");
+        assert!(preview.contains("+9 −1  src/f9.rs"), "largest first: {preview}");
+        assert!(preview.contains("… 3 more files") && !preview.contains("logo.png"), "{preview}");
+    }
+
+    #[test]
+    fn enter_on_a_tab_focuses_it_and_its_agent() {
+        let _lock = env_lock();
+        let tmp = TempDir::new();
+        let mut env = EnvVars::new();
+        let mut picker = tree_picker(tmp.path(), &mut env);
+        picker.selected = 3;
+        let Some(Outcome::Started(started)) = key(&mut picker, "enter") else { panic!("no focus outcome") };
+        assert_eq!((started.workspace_id.as_str(), started.tab_id.as_str(), started.pane_id.as_str(), started.agent.as_str()), ("w2", "w2:t1", "w2:p1", "claude-feat"));
+        picker.selected = 4;
+        let Some(Outcome::Started(started)) = key(&mut picker, "enter") else { panic!("no focus outcome") };
+        assert_eq!((started.tab_id.as_str(), started.agent.as_str()), ("w2:t2", ""));
+        picker.selected = 2;
+        assert!(matches!(key(&mut picker, "enter"), Some(Outcome::Jump(1))));
+    }
+
+    #[test]
+    fn ctrl_s_on_a_tab_offers_only_that_tabs_agents() {
+        let _lock = env_lock();
+        let tmp = TempDir::new();
+        let mut env = EnvVars::new();
+        let mut picker = tree_picker(tmp.path(), &mut env);
+        picker.agents[1].push(AgentHere { name: Some("codex-feat".into()), kind: "codex".into(), status: "idle".into(), cwd: "/repo/.worktrees/feat".into(), pane_id: "w2:p9".into(), tab_id: "w2:t9".into() });
+        picker.selected = 3;
+        key(&mut picker, "ctrl+s");
+        let Mode::Agent { target: Target::Running(1), kinds, .. } = &picker.mode else { panic!("not sending") };
+        assert_eq!(kinds, &["claude-feat"]);
+        key(&mut picker, "esc");
+        picker.selected = 4;
+        key(&mut picker, "ctrl+s");
+        assert!(matches!(picker.mode, Mode::List));
+        assert!(picker.status.as_ref().unwrap().0.contains("no agent is running in this tab"));
+        picker.selected = 1;
+        key(&mut picker, "ctrl+s");
+        let Mode::Agent { kinds, .. } = &picker.mode else { panic!("not sending") };
+        assert_eq!(kinds.len(), 2, "the worktree row offers every agent in it");
+    }
+
+    #[test]
+    fn ctrl_t_offers_a_shell_tab() {
+        let _lock = env_lock();
+        let tmp = TempDir::new();
+        let mut env = EnvVars::new();
+        fake_agents(tmp.path(), &mut env);
+        let mut picker = tree_picker(tmp.path(), &mut env);
+        picker.selected = 2;
+        key(&mut picker, "ctrl+t");
+        let Mode::Agent { target: Target::Existing(1), kinds, .. } = &picker.mode else { panic!("no agent picker") };
+        assert_eq!(kinds.last().map(String::as_str), Some(SHELL));
+        assert!(plain(&mut picker, 120, 20).join("\n").contains("a new tab with no agent"));
+    }
+
+    #[test]
+    fn alt_r_renames_the_tab_or_the_space() {
+        let _lock = env_lock();
+        let tmp = TempDir::new();
+        let mut env = EnvVars::new();
+        let mut picker = tree_picker(tmp.path(), &mut env);
+        picker.selected = 0;
+        key(&mut picker, "alt+r");
+        assert!(matches!(picker.mode, Mode::List), "main has no space");
+        picker.selected = 1;
+        key(&mut picker, "alt+r");
+        let Mode::Rename { what: Rename::Space { id, .. }, edit } = &picker.mode else { panic!("not renaming the space") };
+        assert_eq!((id.as_str(), edit.text.as_str()), ("w2", "cache work"));
+        assert!(plain(&mut picker, 120, 20)[0].contains("rename space ❯"));
+        key(&mut picker, "esc");
+        picker.selected = 4;
+        key(&mut picker, "alt+r");
+        let Mode::Rename { what: Rename::Tab { id, .. }, .. } = &picker.mode else { panic!("not renaming the tab") };
+        assert_eq!(id, "w2:t2");
+        key(&mut picker, "ctrl+u");
+        key(&mut picker, "enter");
+        assert_eq!(picker.status.as_ref().unwrap().0, "type a name");
+    }
+
+    #[test]
+    fn cleanup_refuses_unsafe_worktrees_and_keeps_unmerged_branches() {
+        let _lock = env_lock();
+        let tmp = TempDir::new();
+        let mut env = EnvVars::new();
+        let mut picker = tree_picker(tmp.path(), &mut env);
+        assert_eq!(picker.cleanup_blocker(0).unwrap(), "the main checkout stays");
+        assert_eq!(picker.cleanup_blocker(1).unwrap(), "an agent is still working in it");
+        picker.agents[1][0].status = "idle".into();
+        assert_eq!(picker.cleanup_blocker(1), None);
+        picker.facts[1] = Some(GitFacts { dirty: Some(2), ..GitFacts::default() });
+        assert_eq!(picker.cleanup_blocker(1).unwrap(), "it has 2 uncommitted changes");
+        picker.facts[1] = None;
+        assert!(picker.cleanup_blocker(1).unwrap().contains("loading"));
+        picker.facts[1] = Some(GitFacts { dirty: Some(0), ..GitFacts::default() });
+        picker.project.as_mut().unwrap().source_checkout = "/repo/.worktrees/feat".into();
+        assert!(picker.cleanup_blocker(1).unwrap().contains("opened the picker"));
+        picker.project.as_mut().unwrap().source_checkout = "/repo".into();
+
+        // The branch goes only when GitHub merged exactly this commit.
+        let merged = |oid: &str| PrInfo { state: PrState::Merged, via_upstream: false, reason: None, pr: Some(crate::model::PullRequest {
+            number: 7, title: "t".into(), url: "u".into(), state: PrState::Merged, head_ref: "feat".into(), head_oid: oid.into(),
+            head_owner: String::new(), base_ref: "main".into(), created_at: String::new(), merged_at: None,
+        }) };
+        picker.prs[1] = merged("bbb");
+        assert!(picker.deletes_branch(1));
+        picker.prs[1] = merged("later");
+        assert!(!picker.deletes_branch(1));
+        picker.prs[1] = merged("");
+        assert!(!picker.deletes_branch(1));
+
+        picker.selected = 1;
+        picker.prs[1] = merged("bbb");
+        picker.rebuild_items();
+        key(&mut picker, "alt+d");
+        let footer = crate::textutil::strip_ansi(&picker.footer(120));
+        assert!(footer.contains("clean up “feat (checkout, space and branch)”?"), "{footer}");
+        key(&mut picker, "esc");
+        assert!(matches!(picker.mode, Mode::List));
+        // alt+d on a tab closes just that tab.
+        picker.selected = 4;
+        key(&mut picker, "alt+d");
+        assert!(matches!(&picker.mode, Mode::Confirm(Removal::Tab { id, .. }) if id == "w2:t2"));
+        key(&mut picker, "x");
+        assert!(matches!(picker.mode, Mode::List), "any other key keeps it");
+        // alt+shift+d gathers the merged worktrees that are ready.
+        key(&mut picker, "alt+D");
+        assert!(matches!(&picker.mode, Mode::Confirm(Removal::Worktrees(list)) if list == &[1]));
+        key(&mut picker, "esc");
+        picker.facts[1] = Some(GitFacts { dirty: Some(1), ..GitFacts::default() });
+        key(&mut picker, "alt+D");
+        assert!(picker.status.as_ref().unwrap().0.contains("1 merged, none ready"));
+    }
+
+    #[test]
+    fn question_mark_lists_the_keys_of_the_current_mode() {
+        let _lock = env_lock();
+        let tmp = TempDir::new();
+        let mut env = EnvVars::new();
+        let mut picker = tree_picker(tmp.path(), &mut env);
+        picker.insert("?", false);
+        assert!(matches!(picker.mode, Mode::Help(_)));
+        let screen = plain(&mut picker, 120, 30).join("\n");
+        assert!(screen.contains("alt+r") && screen.contains("rename the space or tab"), "{screen}");
+        key(&mut picker, "esc");
+        assert!(matches!(picker.mode, Mode::List));
+        assert!(picker.query.text.is_empty());
+        key(&mut picker, "ctrl+t");
+        picker.insert("?", false);
+        assert!(plain(&mut picker, 120, 30).join("\n").contains("choose the preset"));
+        picker.insert("q", false);
+        assert!(matches!(picker.mode, Mode::Agent { .. }), "back where ? was pressed");
+    }
+
+    #[test]
+    fn new_worktree_names_its_space_with_tab() {
+        let _lock = env_lock();
+        let tmp = TempDir::new();
+        let mut env = EnvVars::new();
+        fake_agents(tmp.path(), &mut env);
+        let mut picker = tree_picker(tmp.path(), &mut env);
+        key(&mut picker, "ctrl+x");
+        picker.insert("feat cache", false);
+        key(&mut picker, "tab");
+        picker.insert("cache work", false);
+        let screen = plain(&mut picker, 120, 20).join("\n");
+        assert!(screen.contains("space ❯ cache work"), "{screen}");
+        key(&mut picker, "tab");
+        let Mode::Branch { edit, label, naming: false } = &picker.mode else { panic!() };
+        assert_eq!((edit.text.as_str(), label.text.as_str()), ("feat-cache", "cache work"));
+        picker.new_label = "stale".into();
+        key(&mut picker, "ctrl+x");
+        assert_eq!(picker.new_label, "stale", "^x is a list key; the branch input keeps its text");
     }
 
     #[test]

@@ -65,8 +65,11 @@ bin/hertrees start --cwd /tmp/demo --path /tmp/demo --agent claude --preset plan
 bin/hertrees start --cwd /tmp/demo --branch feat/cache --base main \
   --agent codex --prompt 'Implement the cache in {path} on {branch}.' --focus
 
-# A new worktree containing only a shell, with no agent or prompt.
-bin/hertrees start --cwd /tmp/demo --branch scratch --agent shell --focus
+# A new worktree containing only a shell, with no agent or prompt; its space named.
+bin/hertrees start --cwd /tmp/demo --branch scratch --label 'scratch pad' --agent shell --focus
+
+# A shell tab in an existing checkout's space.
+bin/hertrees start --cwd /tmp/demo --path /tmp/demo --agent shell
 ```
 
 New worktrees are created at `<repo_root>/.worktrees/<branch>`; branch names with
@@ -80,8 +83,10 @@ case-sensitive name, or `blank`; `custom` requires `--prompt TEXT`. Given both, 
 is added to the preset the way the popup's editor adds it: at the preset's `{input}`,
 otherwise below it after a blank line. The result expands the
 [placeholders](#placeholders); a placeholder the prompt defines itself (`{ticket}`)
-needs `--var ticket=VALUE`, and a missing one is an error naming each `--var` required. `--agent shell` is only valid with `--branch`; leave
-prompt options off because a shell has no agent to receive them. Focus remains
+needs `--var ticket=VALUE`, and a missing one is an error naming each `--var` required. `--agent shell` opens a tab (with `--path`) or a new
+worktree (with `--branch`) with no agent; leave prompt options off because a shell has
+no agent to receive them. `--label NAME` names a new worktree's space (default: the
+branch) and is valid only with `--branch`. Focus remains
 unchanged unless `--focus` is supplied.
 
 ### Session results
@@ -201,6 +206,7 @@ defaults; unknown keys are ignored. Presets belong in files, not a JSON `presets
 | `preview` | `"auto"` (default), `true` or `false`; auto fits a preview when space allows |
 | `mouse` | Enable popup mouse input; default `true` |
 | `agent_icons` | `"auto"` detects the icon font (default), `"font"` forces it; other values disable icons |
+| `icons` | Worktree, space and tab glyphs: `"auto"` (default) uses Nerd Font glyphs when one is installed (fontconfig covers U+F418, or a `*NerdFont*` file in a font folder), else `⎇ ◫ ▭`; `"nerd"`, `"unicode"` or `"off"` |
 | `refresh_ms` | Popup refresh interval, default 900 ms; minimum 200 |
 | `selection_background` | `"auto"` (default), a color, or `null` for no background override |
 | `colors` | Role-to-color object, default `{}`; roles in `src/theme.rs::DEFAULTS` |
