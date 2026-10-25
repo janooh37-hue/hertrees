@@ -8,7 +8,7 @@ Examples below use `bin/hertrees` and an example repository at `/tmp/demo`; subs
 real paths and installed agent kinds. Session commands require a running Herdr server.
 
 For exact interfaces, inspect `src/cli.rs` (`list`, `print_presets`, `parse_start`,
-`start`, `send`), `src/presets.rs` (files and names), and `src/config.rs` (lookup and keys).
+`start`, `send`, `clean`), `src/presets.rs` (files and names), and `src/config.rs` (lookup and keys).
 These are authoritative if an installed binary differs from this guide. Headless commands
 print JSON to stdout; command errors use exit status **2** and stderr prefixed `hertrees:`.
 Parse JSON rather than scraping the popup. Exit status 0 from `start` reports a launched
@@ -116,6 +116,31 @@ agent's worktree. It returns `{"agent": NAME, "deferred": BOOL}`. `deferred: fal
 the agent was idle and started working on it; `true` means it was busy or waiting on a
 question, and a detached sender delivers the prompt once it is idle (it stops after 15
 minutes or if the agent exits). The popup's `^s` does the same.
+
+## Clean up worktrees
+
+```sh
+bin/hertrees clean --cwd /tmp/demo --merged --dry-run       # what would go, and why the rest stay
+bin/hertrees clean --cwd /tmp/demo --merged                 # every merged worktree that is safe
+bin/hertrees clean --cwd /tmp/demo --path /tmp/demo/.worktrees/feat/cache
+```
+
+Pass exactly one target: `--path` for a checkout returned by `--list`, or `--merged` for
+every worktree whose `pr_state` is `merged`. Each one's space is closed (with everything
+running in it), its checkout removed and, only when GitHub merged the PR at exactly the
+checkout's current commit, its local branch deleted; otherwise the branch stays. It is
+the popup's `alt+d` / `alt+⇧d` under the same refusals: the main checkout, the checkout
+`--cwd` is in, uncommitted or untracked changes, and an agent that is `working` or
+`blocked`. Nothing is forced. Idle agents in the space are closed with it, so check
+`--list` first when they matter.
+
+It returns `{"dry_run": BOOL, "removed": […], "kept": […]}`. `removed` entries have `path`,
+`branch` (nullable), `workspace` (the closed space's id, or null) and `branch_deleted`;
+with `--dry-run` they are what would be removed and nothing changes. `kept` entries have
+`path`, `branch` and `reason`. With `--merged`, a worktree whose `pr_state` is `unknown`
+is kept with the PR's reason rather than treated as unmerged, and a removal that fails is
+kept with the error; the exit status is still 0. With `--path`, a refusal or failure is an
+error (`hertrees: feat stays: it has 1 uncommitted change`, exit status 2).
 
 ## Preset files
 

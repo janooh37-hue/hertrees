@@ -19,7 +19,7 @@ any of them or in a brand-new worktree.
 - **Spaces and tabs:** each worktree's Herdr space and its tabs sit under it in the list (`⎇` worktree, `◫` space, `▭` tab; Nerd Font glyphs when you have one). Name the space when you create the worktree, rename spaces and tabs with `alt+r`, open a tab with `⏎`.
 - **New sessions:** start an agent in a worktree, or create a worktree and start one, with a preset first prompt (`blank`, `plan`, `research`, your own, or `custom`). `^t` opens a new tab with an agent or a plain shell.
 - **Send to an agent:** `^s` on a tab sends a preset or your own prompt straight to the agent in it.
-- **Clean up:** `alt+d` removes a finished worktree: its space, its checkout, and its branch once GitHub merged it. `alt+⇧d` cleans up every merged one. Nothing with uncommitted changes or a working agent is touched.
+- **Clean up:** `alt+d` removes a finished worktree: its space, its checkout, and its branch once GitHub merged it. `alt+⇧d` cleans up every merged one. Nothing with uncommitted changes or a working agent is touched. Agents and scripts use `hertrees clean`.
 - **Local facts:** dirty files `±N`, ahead/behind `↑↓`, last commit age, recent commits, and in the preview what the branch changed against `main`: commits both ways and the files with their `+`/`−` lines.
 
 ## Quick start
@@ -163,12 +163,13 @@ bin/hertrees start --cwd /path/to/repo --branch feat/cache --agent claude --pres
 bin/hertrees start --cwd /path/to/repo --path /path/to/repo --agent claude \
   --preset rules --prompt 'fix the login bug' --var ticket=HT-42
 bin/hertrees send --cwd /path/to/repo --agent claude-main --prompt 'run the tests'
+bin/hertrees clean --cwd /path/to/repo --merged --dry-run   # what alt+⇧d would remove
 bin/hertrees --help                       # all flags
 bin/hertrees --version                    # version, under the pixel mark on a terminal
 ```
 
 `bin/` is inside the installed plugin checkout (`plugin_root` in `herdr plugin list --json`).
-Scripts and agents can start sessions headlessly; see
+Scripts and agents can start, prompt and clean up sessions headlessly; see
 [Using Hertrees from an agent](docs/agents.md).
 
 ## Development

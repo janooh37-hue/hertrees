@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.6 (2026-10-25)
+
+- Headless clean up: `hertrees clean --path CHECKOUT` or `--merged` does what `alt+d` /
+  `alt+⇧d` do, with the same refusals, and prints what it removed and what it kept and
+  why as JSON. `--dry-run` reports without changing anything. A worktree whose PR state
+  is unknown is kept, not treated as unmerged.
+
 ## 0.2.5 (2026-10-25)
 
 - Spaces and tabs: each worktree's Herdr space and its tabs are listed under it, with an

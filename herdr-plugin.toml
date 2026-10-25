@@ -1,6 +1,6 @@
 id = "hertrees"
 name = "Hertrees"
-version = "0.2.5"
+version = "0.2.6"
 # Needs worktree.list/create/open, agent.start/wait/prompt and popup plugin panes.
 min_herdr_version = "0.9.3"
 description = "Every git worktree of a project with its PR state, and agent sessions, in one popup"

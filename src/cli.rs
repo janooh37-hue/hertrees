@@ -25,6 +25,7 @@ usage: hertrees [options]
        hertrees start [--cwd PATH] (--path CHECKOUT | --branch NEW [--base REF] [--label NAME])
                       --agent KIND [--preset NAME] [--prompt TEXT] [--var NAME=VALUE]… [--focus]
        hertrees send [--cwd PATH] --agent NAME [--preset NAME] [--prompt TEXT] [--var NAME=VALUE]…
+       hertrees clean [--cwd PATH] (--path CHECKOUT | --merged) [--dry-run]
 
 options:
   --open           open the picker popup through the Herdr CLI
@@ -44,9 +45,15 @@ subcommands:
     --focus        focus the started session (default: leave focus unchanged)
   send             prompt an agent already running in the project (--agent NAME is its
                    herdr name or pane id); a busy agent gets it once it is idle
+  clean            remove a finished worktree: close its space, remove the checkout, and
+                   delete the branch when GitHub merged it at its current commit
+    --merged       every worktree whose PR is merged and that is safe to remove
+    --dry-run      report what would be removed and why the rest stay; change nothing
   Placeholders: {branch} {base} {path} {repo} {pr} {pr_title} {pr_body} {commits}
   {diffstat} {input}. start prints workspace_id, tab_id, pane_id, agent (name, empty
-  for shell), path, and prompt_deferred as JSON; send prints agent and deferred.
+  for shell), path, and prompt_deferred as JSON; send prints agent and deferred;
+  clean prints dry_run, removed (path, branch, workspace, branch_deleted) and kept
+  (path, branch, reason).
   Errors go to stderr with exit status 2.
 
 Normally Herdr launches this itself:
@@ -362,6 +369,116 @@ fn send(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Debug, Default, PartialEq)]
+struct CleanArgs {
+    cwd: Option<String>,
+    path: Option<String>,
+    merged: bool,
+    dry_run: bool,
+}
+
+fn parse_clean(args: &[String]) -> Result<CleanArgs, String> {
+    let mut parsed = CleanArgs::default();
+    let mut args = args.iter();
+    while let Some(flag) = args.next() {
+        let switch = match flag.as_str() {
+            "--merged" => Some(&mut parsed.merged),
+            "--dry-run" => Some(&mut parsed.dry_run),
+            _ => None,
+        };
+        if let Some(switch) = switch {
+            if *switch { return Err(format!("{flag} specified more than once")); }
+            *switch = true;
+            continue;
+        }
+        let slot = match flag.as_str() {
+            "--cwd" => &mut parsed.cwd,
+            "--path" => &mut parsed.path,
+            _ => return Err(format!("unknown clean option: {flag}")),
+        };
+        if slot.is_some() { return Err(format!("{flag} specified more than once")); }
+        let value = args.next().filter(|value| !value.is_empty() && !value.starts_with("--")).ok_or_else(|| format!("{flag} needs a value"))?;
+        *slot = Some(value.clone());
+    }
+    if parsed.path.is_some() == parsed.merged {
+        return Err("clean needs exactly one of --path CHECKOUT or --merged".into());
+    }
+    Ok(parsed)
+}
+
+/// `clean`: the popup's alt+d (`--path`) or alt+shift+d (`--merged`), under the
+/// same refusals. A refused or failed `--path` is an error; `--merged` reports
+/// each worktree it kept and why.
+fn clean(args: &[String]) -> Result<(), String> {
+    let args = parse_clean(args)?;
+    let mut client = HerdrClient::from_env();
+    let cwd = args.cwd.clone().or_else(|| source_cwd(&[])).ok_or("no working directory: use --cwd PATH")?;
+    let (project, worktrees) = project::load(&mut client, &cwd)?;
+    let agents = project::agents(&mut client);
+    let by_worktree = project::agents_by_worktree(&worktrees, &agents);
+    let gh = crate::pr::github_repo(&project.repo_root);
+    let cached = gh.as_ref().ok().and_then(crate::pr::cached);
+    let prs = classify_prs(&project, &worktrees, &Config::load(), &gh, cached.as_ref());
+    let entry = |wt: &Worktree| {
+        let mut map = Map::new();
+        map.insert("path", Value::str(wt.path.clone()));
+        map.insert("branch", opt(wt.branch.as_ref()));
+        map
+    };
+    let (mut removed, mut kept) = (Vec::new(), Vec::new());
+    let mut keep = |wt: &Worktree, reason: String| {
+        let mut map = entry(wt);
+        map.insert("reason", Value::str(reason));
+        kept.push(Value::Dict(map));
+    };
+    let targets: Vec<usize> = match &args.path {
+        Some(path) => {
+            let wt = matching_worktree(&worktrees, path)?;
+            vec![worktrees.iter().position(|candidate| std::ptr::eq(candidate, wt)).unwrap()]
+        }
+        None => (0..worktrees.len()).filter(|&i| {
+            let wt = &worktrees[i];
+            match prs[i].state {
+                PrState::Merged => true,
+                // Missing PR data is not evidence of no PR: say so.
+                PrState::Unknown if !(wt.is_main || wt.bare) => {
+                    keep(wt, format!("its pull request is unknown: {}", prs[i].reason.as_deref().unwrap_or("no reason given")));
+                    false
+                }
+                _ => false,
+            }
+        }).collect(),
+    };
+    for index in targets {
+        let wt = &worktrees[index];
+        let dirty = if wt.is_main || wt.bare || wt.prunable { None } else { project::git_facts(&wt.path, None).dirty };
+        let blocker = session::cleanup_blocker(wt, &project.source_checkout, &by_worktree[index], dirty)
+            .map(|reason| if dirty.is_none() && reason.contains("loading") { "its git status could not be read".to_owned() } else { reason });
+        let delete_branch = session::deletes_branch(wt, &prs[index]);
+        let outcome = match blocker {
+            Some(reason) => Err(reason),
+            None if args.dry_run => Ok(delete_branch),
+            None => session::remove_worktree(&mut client, &project, wt, delete_branch).map(|done| done.branch_deleted),
+        };
+        match outcome {
+            Ok(branch_deleted) => {
+                let mut map = entry(wt);
+                map.insert("workspace", opt(wt.open_workspace_id.as_ref()));
+                map.insert("branch_deleted", Value::Bool(branch_deleted));
+                removed.push(Value::Dict(map));
+            }
+            Err(reason) if args.path.is_some() => return Err(format!("{} stays: {}", wt.title(), reason)),
+            Err(reason) => keep(wt, reason),
+        }
+    }
+    let mut result = Map::new();
+    result.insert("dry_run", Value::Bool(args.dry_run));
+    result.insert("removed", Value::List(removed));
+    result.insert("kept", Value::List(kept));
+    out(&(pyjson::dumps_indent(&Value::Dict(result), 2) + "\n"));
+    Ok(())
+}
+
 /// `--list`: the rows, with PRs fetched (or cached) and agents joined.
 fn list(client: HerdrClient, config: Config, cwd: Option<String>) -> i32 {
     let mut client = client;
@@ -419,7 +536,7 @@ fn list(client: HerdrClient, config: Config, cwd: Option<String>) -> i32 {
 
 pub fn main(args: Vec<String>) -> i32 {
     // Dispatch before global flags so prompt text such as "--help" stays literal.
-    if matches!(args.first().map(String::as_str), Some("start" | "send" | "presets")) {
+    if matches!(args.first().map(String::as_str), Some("start" | "send" | "clean" | "presets")) {
         if args.len() == 2 && matches!(args[1].as_str(), "--help" | "-h") {
             out(USAGE);
             return 0;
@@ -428,6 +545,7 @@ pub fn main(args: Vec<String>) -> i32 {
             "presets" if args.len() == 1 => print_presets(),
             "presets" => fail("presets does not accept options"),
             "send" => match send(&args[1..]) { Ok(()) => 0, Err(error) => fail(&error) },
+            "clean" => match clean(&args[1..]) { Ok(()) => 0, Err(error) => fail(&error) },
             _ => match start(&args[1..]) { Ok(()) => 0, Err(error) => fail(&error) },
         };
     }
@@ -569,6 +687,22 @@ mod tests {
         ] {
             assert!(parse_start(&args(&input)).unwrap_err().contains(error), "{input:?}");
         }
+    }
+
+    #[test]
+    fn clean_needs_one_target_and_known_options() {
+        for (input, expected) in [
+            (vec![], "exactly one"),
+            (vec!["--path", "/repo/.worktrees/x", "--merged"], "exactly one"),
+            (vec!["--path"], "--path needs a value"),
+            (vec!["--path", "--merged"], "--path needs a value"),
+            (vec!["--merged", "--merged"], "more than once"),
+            (vec!["--merged", "--force"], "unknown clean option"),
+        ] {
+            assert!(parse_clean(&args(&input)).unwrap_err().contains(expected), "{input:?}");
+        }
+        let parsed = parse_clean(&args(&["--dry-run", "--cwd", "/repo", "--merged"])).unwrap();
+        assert_eq!(parsed, CleanArgs { cwd: Some("/repo".into()), path: None, merged: true, dry_run: true });
     }
 
     #[test]
