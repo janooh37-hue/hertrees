@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="branding/banner/banner@2x.png" alt="Hertrees: every worktree, every agent, one popup." width="860">
+  <picture>
+    <source type="image/svg+xml" srcset="branding/banner/banner.svg">
+    <img src="branding/banner/banner@2x.png" alt="Hertrees: every worktree, every agent, one popup." width="860">
+  </picture>
 </p>
 
 # Hertrees
@@ -92,6 +95,7 @@ All keys, defaults and colour roles are in [docs/agents.md](docs/agents.md#confi
 bin/hertrees --list --cwd /path/to/repo   # worktrees, PR state and agents as JSON
 bin/hertrees start --cwd /path/to/repo --branch feat/cache --agent claude --preset plan
 bin/hertrees --help                       # all flags
+bin/hertrees --version                    # version, under the pixel mark on a terminal
 ```
 
 Scripts and agents can start sessions headlessly; see
@@ -109,7 +113,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md).
 
 ## Credits
 
-Made by Ahmed Al Ali; brand assets are in [`branding/`](branding). The terminal UI layer
+Made by Ahmed Al Ali. The logo, banner, palette and terminal mark are in
+[`branding/`](branding), with a guide to using them. The terminal UI layer
 (painter, input decoder, theme, fuzzy matcher, row layout) started from
 [herdr-bar](https://github.com/jeffarese/herdr-bar) by Jeff Arese (MIT,
 `LICENSE.herdr-bar`). Hertrees is now an independent project.
@@ -118,3 +123,10 @@ Made by Ahmed Al Ali; brand assets are in [`branding/`](branding). The terminal 
 
 MIT, see [LICENSE](LICENSE). Code derived from herdr-bar is under its own MIT licence, see
 [LICENSE.herdr-bar](LICENSE.herdr-bar).
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="branding/light/lockup-light.svg">
+    <img src="branding/logo/lockup/lockup.svg" alt="Hertrees" width="240">
+  </picture>
+</p>

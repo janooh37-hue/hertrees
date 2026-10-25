@@ -9,6 +9,7 @@ use crate::model::{PrInfo, PrState, Project, Worktree};
 use crate::opener::open_picker;
 use crate::presets::{self, Preset};
 use crate::project;
+use crate::render;
 use crate::pyjson::{self, Map, Value};
 use crate::session;
 use crate::term::{detect_appearance, isatty, Terminal};
@@ -44,6 +45,25 @@ subcommands:
 Normally Herdr launches this itself:
   herdr plugin action invoke open --plugin hertrees
 ";
+
+/// The truecolor mark; its background cells are the brand ink.
+const MARK_ANSI: &str = include_str!("../branding/terminal/mark.ansi");
+const INK_CELL: &str = "\x1b[38;2;20;23;31;48;2;20;23;31m";
+
+/// `--version`: the mark above the version line on a terminal (plain with
+/// NO_COLOR); just the version line otherwise, so scripts see no change.
+fn version_text(tty: bool, no_color: bool) -> String {
+    let line = format!("hertrees {}\n", VERSION);
+    if !tty {
+        return line;
+    }
+    let mark = if no_color {
+        render::mark_rows(render::MARK, |row| row.trim().is_empty())
+    } else {
+        render::mark_rows(MARK_ANSI, |row| row.replace(INK_CELL, "").replace("\x1b[0m", "").chars().all(|c| c == '▀'))
+    };
+    format!("{}\n{}", mark.join("\n"), line)
+}
 
 fn out(text: &str) {
     let mut stdout = std::io::stdout().lock();
@@ -314,7 +334,8 @@ pub fn main(args: Vec<String>) -> i32 {
         return 0;
     }
     if has("--version") {
-        out(&format!("hertrees {}\n", VERSION));
+        let no_color = std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty());
+        out(&version_text(isatty(1), no_color));
         return 0;
     }
     if has("--open") {
@@ -403,6 +424,24 @@ mod tests {
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).into()).collect()
+    }
+
+    #[test]
+    fn version_shows_the_mark_only_on_a_terminal() {
+        let line = format!("hertrees {}\n", VERSION);
+        for no_color in [false, true] {
+            assert_eq!(version_text(false, no_color), line, "pipes keep the bare version line");
+        }
+        let color = version_text(true, false);
+        assert!(color.ends_with(&format!("\x1b[0m\n{}", line)));
+        assert!(color.contains("\x1b[38;2;"));
+        let first = color.lines().next().unwrap().replace(INK_CELL, "");
+        assert!(first.contains("\x1b[38;2;"), "blank ink rows are dropped");
+        let plain = version_text(true, true);
+        assert!(plain.ends_with(&line));
+        assert!(!plain.contains('\x1b'));
+        assert!(!plain.lines().next().unwrap().trim().is_empty());
+        assert_eq!(plain.lines().count(), render::mark_rows(render::MARK, |r| r.trim().is_empty()).len() + 1);
     }
 
     #[test]

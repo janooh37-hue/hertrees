@@ -22,7 +22,8 @@ or configure it, read [docs/agents.md](docs/agents.md). This file is for changin
   Herdr/OS/process integration; `src/testutil.rs`: test fixtures and environment isolation.
 - `scripts/install.sh`: release build and atomic replacement of `bin/hertrees`.
 - `scripts/e2e.sh`: disposable live Herdr/Claude integration exercise.
-- `branding/`: public brand assets and usage guide; see `branding/README.md`.
+- `branding/`: public brand assets and usage guide; see `branding/README.md`. `branding/terminal/`
+  is compiled in (`include_str!` in `render.rs`, `cli.rs`), so keep those paths.
 - `tests/data/`: test fixtures. Prefer current source or live `herdr --help` over any
   saved notes when they disagree.
 

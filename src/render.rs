@@ -482,6 +482,47 @@ pub fn render_confirm(theme: &Theme, width: isize, action: &str, title: &str, ke
     segments_to_text(theme, &segments, "")
 }
 
+/// The brand mark in block characters (shepherd, lantern, tree).
+pub const MARK: &str = include_str!("../branding/terminal/mark.txt");
+
+/// The rows of block art, without blank rows above or below it.
+pub fn mark_rows(art: &str, blank: impl Fn(&str) -> bool) -> Vec<&str> {
+    let rows: Vec<&str> = art.lines().collect();
+    let start = rows.iter().position(|row| !blank(row)).unwrap_or(rows.len());
+    let end = rows.iter().rposition(|row| !blank(row)).map_or(start, |last| last + 1);
+    rows[start..end].to_vec()
+}
+
+/// The plain mark, centered in `width`, or nothing when it does not fit: the
+/// shepherd in the accent colour, the lantern amber, the tree green, the
+/// ground muted. Theme roles, so it follows the configured colours.
+pub fn render_mark(theme: &Theme, width: isize) -> Vec<String> {
+    let rows = mark_rows(MARK, |row| row.trim().is_empty());
+    let mark_width = rows.iter().map(|row| display_width(row)).max().unwrap_or(0) as isize;
+    if mark_width > width {
+        return Vec::new();
+    }
+    let left = " ".repeat(((width - mark_width) / 2) as usize);
+    let last = rows.len().saturating_sub(1);
+    rows.iter().enumerate().map(|(index, row)| {
+        let mut segments: Vec<Segment> = Vec::new();
+        for (column, ch) in row.chars().enumerate() {
+            let role = match (ch, column) {
+                (' ', _) => "",
+                _ if index == last => "muted",
+                (_, 0..=12) => "accent",
+                (_, 13..=19) => "working",
+                _ => "idle",
+            };
+            match segments.last_mut() {
+                Some(segment) if segment.role == role => segment.text.push(ch),
+                _ => segments.push(Segment::new(role, ch.to_string())),
+            }
+        }
+        pad(&format!("{}{}", left, segments_to_text(theme, &segments, "")), width)
+    }).collect()
+}
+
 pub fn render_empty_state(theme: &Theme, width: isize, lines: &[(&str, &'static str, bool)], filter: &str) -> Vec<String> {
     let mut out = Vec::new();
     for &(text, role, bold) in lines {
@@ -589,6 +630,18 @@ mod tests {
 
     fn row() -> Row {
         Row { item: 0, positions: Vec::new(), field_positions: BTreeMap::new() }
+    }
+
+    #[test]
+    fn mark_drops_blank_rows_and_fits_or_is_left_out() {
+        assert_eq!(mark_rows("\n  \nab\n\ncd\n \n", |r| r.trim().is_empty()), ["ab", "", "cd"]);
+        assert!(mark_rows(" \n", |r| r.trim().is_empty()).is_empty());
+        let theme = Theme::new(None, None, None);
+        let mark = render_mark(&theme, 40);
+        assert_eq!(mark.len(), mark_rows(MARK, |r| r.trim().is_empty()).len());
+        assert!(mark.iter().all(|row| visible_width(row) == 40));
+        assert!(!strip_ansi(&mark[0]).trim().is_empty());
+        assert!(render_mark(&theme, 31).is_empty());
     }
 
     #[test]

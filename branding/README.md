@@ -24,7 +24,20 @@ to this project; use it to link to or write about Hertrees.
 | [`banner/`](banner) | wide hero image for READMEs and sites |
 | [`social/`](social) | 1280x640 GitHub social-preview image |
 | [`favicon/`](favicon) | `favicon.ico` (16, 32, 48) |
-| [`terminal/`](terminal) | block-character mark for `--help` and TUI headers (`mark.txt` plain, `mark.ansi` truecolor) |
+| [`terminal/`](terminal) | block-character mark for terminals (`mark.txt` plain, `mark.ansi` truecolor) |
+
+## Where each asset is used
+
+| Asset | Used in |
+|---|---|
+| `banner/` | README header (SVG, PNG fallback); its own dark ground suits light and dark pages |
+| `logo/lockup/`, `light/` | README footer: `lockup.svg` on dark themes, `lockup-light.svg` on light |
+| `logo/mark/`, `logo/icon/` | avatars and docs (`icon-64.png` heads `docs/agents.md`); a Herdr marketplace icon if it ever takes one |
+| `social/social.png` | GitHub Settings → Social preview (uploaded by hand; the repo is public) |
+| `favicon/` | any future docs site or GitHub Pages |
+| `terminal/mark.ansi` | `hertrees --version` on a terminal; `mark.txt` with `NO_COLOR`. Piped output stays one line |
+| `terminal/mark.txt` | the popup's "not a git project" and "no worktrees" states, in theme colours, when the popup is tall enough |
+| `palette.svg` | this guide. The popup's defaults in `src/theme.rs` are ANSI colours so it follows the terminal's theme; the roles line up (leaf: idle and merged, cloak blue: accent and open, amber: working and draft, red: blocked and closed), and these hex values can be set under `colors` in the config |
 
 ## Colour
 

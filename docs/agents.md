@@ -1,3 +1,5 @@
+<p align="center"><img src="../branding/logo/icon/icon-64.png" alt="" width="32"></p>
+
 # Using Hertrees from an agent
 
 Use this guide when operating the plugin, not changing its implementation. Start with

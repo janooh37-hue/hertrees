@@ -1464,7 +1464,16 @@ impl Picker {
         } else {
             vec![("no matches", "text", true)]
         };
-        let empty = render::render_empty_state(&self.theme, layout.list_width, &lines, filter);
+        let mut empty = render::render_empty_state(&self.theme, layout.list_width, &lines, filter);
+        // Nothing to list at all: show the mark above the message when it fits.
+        if self.load_error.is_some() || self.items.is_empty() {
+            let mut mark = render::render_mark(&self.theme, layout.list_width);
+            if !mark.is_empty() && (mark.len() + 1 + empty.len()) as isize <= layout.list_height {
+                mark.push(String::new());
+                mark.append(&mut empty);
+                empty = mark;
+            }
+        }
         let top = ((layout.list_height - empty.len() as isize).max(0) / 2) as usize;
         let mut out = vec![String::new(); top];
         out.extend(empty);
@@ -1909,6 +1918,22 @@ mod tests {
 
     fn key(picker: &mut Picker, name: &str) -> Option<Outcome> {
         picker.consume(&[Event::Key(name.into())])
+    }
+
+    #[test]
+    fn the_not_a_project_state_shows_the_mark_only_when_it_fits() {
+        let _lock = env_lock();
+        let tmp = TempDir::new();
+        let mut env = EnvVars::new();
+        let mut picker = preset_picker(tmp.path(), &mut env);
+        picker.mode = Mode::List;
+        let mark = render::render_mark(&picker.theme, 60);
+        let tall = crate::textutil::strip_ansi(&picker.compose(80, 30).join("\n"));
+        assert!(tall.contains("not a git project"));
+        assert!(tall.contains(crate::textutil::strip_ansi(&mark[0]).trim()));
+        let short = crate::textutil::strip_ansi(&picker.compose(80, 12).join("\n"));
+        assert!(short.contains("not a git project"));
+        assert!(!short.contains('█'));
     }
 
     #[test]
