@@ -41,8 +41,9 @@ Needs Herdr 0.9.3+ on Linux or macOS, `git`, and an authenticated `gh` for PR st
    description = "worktrees"
    ```
 
-   If `prefix+w` is taken by Herdr's workspace picker, also set `workspace_picker = ""`
-   under `[keys]`. Then run `herdr server reload-config`.
+   `prefix+w` is Herdr's workspace picker by default. This binding takes precedence, but
+   to free the key explicitly, add `workspace_picker = ""` to your `[keys]` table (create
+   it if the file has none). Then run `herdr server reload-config`.
 
 3. Press `prefix+w` in any pane of a git project.
 
@@ -84,8 +85,11 @@ Everything is optional. Edit `~/.config/herdr/plugins/config/hertrees/config.jso
 - Presets are Markdown files in `<config_dir>/presets/`; `plan.md` and `research.md` are
   seeded on first use. Placeholders: `{branch}` `{base}` `{path}` `{repo}` `{pr}`.
   The preset manager opens `$VISUAL`, then `$EDITOR`, then `nvim` or `vi`.
-- Fonts and icons: with the optional "Herdr Agent Icons Max" font installed, vendor logos
-  appear before agent rows; otherwise only plain Unicode glyphs are drawn.
+- Fonts and icons: everything is plain Unicode by default. Vendor logos before agent rows
+  need the optional "Herdr Agent Icons Max" font (`dist/HerdrAgentIconsMax-Regular.ttf` from
+  [herdr-radar](https://github.com/hhdebb/herdr-radar), not bundled here because its marks
+  are third-party trademarks). It is detected in your user or system font folder (and by `fc-match` on Linux);
+  set `"agent_icons": "font"` when it is only installed on the machine running your terminal.
 
 All keys, defaults and colour roles are in [docs/agents.md](docs/agents.md#configuration).
 
@@ -98,6 +102,7 @@ bin/hertrees --help                       # all flags
 bin/hertrees --version                    # version, under the pixel mark on a terminal
 ```
 
+`bin/` is inside the installed plugin checkout (`plugin_root` in `herdr plugin list --json`).
 Scripts and agents can start sessions headlessly; see
 [Using Hertrees from an agent](docs/agents.md).
 

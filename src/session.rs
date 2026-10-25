@@ -197,7 +197,7 @@ fn defer_prompt(agent: &str, prompt: &str) -> Result<(), String> {
     use std::os::unix::process::CommandExt;
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    let dir = std::env::var_os("HERDR_PLUGIN_STATE_DIR").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir);
+    let dir = crate::config::state_dir().filter(|dir| dir.is_absolute()).unwrap_or_else(std::env::temp_dir);
     std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot save deferred prompt: {e}"))?;
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
     let path = dir.join(format!("hertrees-prompt-{}-{stamp}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));

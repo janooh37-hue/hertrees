@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- The PR cache and deferred prompt files live in Herdr's plugin state directory
+  (`HERDR_PLUGIN_STATE_DIR`, else `$XDG_STATE_HOME/herdr/plugins/hertrees`) instead of
+  `~/.cache/hertrees` and the system temp directory. The old cache can be deleted.
+- After a failed session start the popup reloads its worktrees, so a checkout that was
+  created before the failure is listed instead of having its agent shown under main.
+- README: key binding precedence, where to get the optional icon font, where `bin/` is.
+
 ## 0.2.1 (2026-10-25)
 
 - New worktrees are created under the project's `.worktrees/` directory.

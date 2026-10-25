@@ -142,6 +142,11 @@ failed lookup from absence; use the discovery JSON for that distinction.
 2. `$XDG_CONFIG_HOME/herdr/plugins/config/hertrees` when `XDG_CONFIG_HOME` is nonempty.
 3. `~/.config/herdr/plugins/config/hertrees`.
 
+Hertrees writes its private state (the PR cache in `pr-v1/`, and short-lived deferred
+prompt files) to `HERDR_PLUGIN_STATE_DIR`, otherwise `$XDG_STATE_HOME/herdr/plugins/hertrees`
+or `~/.local/state/herdr/plugins/hertrees`. Outside these two plugin directories it only
+creates worktrees and the `/.worktrees/` entry in Git's local `info/exclude`.
+
 `config.json` in that directory is optional. Missing or invalid files fall back to
 defaults; unknown keys are ignored. Presets belong in files, not a JSON `presets` key.
 

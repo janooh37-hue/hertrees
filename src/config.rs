@@ -21,6 +21,17 @@ pub fn config_dir() -> Option<PathBuf> {
     Some(root.join("herdr/plugins/config/hertrees"))
 }
 
+/// The plugin's private state directory (PR cache, deferred prompts): Herdr's
+/// `HERDR_PLUGIN_STATE_DIR`, or the same location headless commands would get.
+pub fn state_dir() -> Option<PathBuf> {
+    if let Some(directory) = std::env::var_os("HERDR_PLUGIN_STATE_DIR").filter(|value| !value.is_empty()) {
+        return Some(PathBuf::from(directory));
+    }
+    let root = std::env::var_os("XDG_STATE_HOME").filter(|value| !value.is_empty()).map(PathBuf::from)
+        .or_else(|| crate::pyos::home().map(|home| PathBuf::from(home).join(".local/state")))?;
+    Some(root.join("herdr/plugins/hertrees"))
+}
+
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -148,6 +159,19 @@ mod tests {
         assert_eq!(config_dir(), Some(PathBuf::from("/xdg/herdr/plugins/config/hertrees")));
         env.set("XDG_CONFIG_HOME", "");
         assert_eq!(config_dir(), Some(PathBuf::from("/home/example/.config/herdr/plugins/config/hertrees")));
+    }
+
+    #[test]
+    fn state_directory_follows_plugin_xdg_and_home_precedence() {
+        use crate::testutil::{env_lock, EnvVars};
+        let _lock = env_lock();
+        let mut env = EnvVars::new();
+        env.set("HOME", "/home/example").set("XDG_STATE_HOME", "/xdg").set("HERDR_PLUGIN_STATE_DIR", "/plugin");
+        assert_eq!(state_dir(), Some(PathBuf::from("/plugin")));
+        env.set("HERDR_PLUGIN_STATE_DIR", "");
+        assert_eq!(state_dir(), Some(PathBuf::from("/xdg/herdr/plugins/hertrees")));
+        env.set("XDG_STATE_HOME", "");
+        assert_eq!(state_dir(), Some(PathBuf::from("/home/example/.local/state/herdr/plugins/hertrees")));
     }
 
 

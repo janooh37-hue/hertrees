@@ -221,9 +221,8 @@ fn decode_snapshot(value: &Value) -> Option<PrSnapshot> {
 }
 
 fn cache_path(repo: &GhRepo) -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))?;
+    // The plugin's own state directory, so nothing lands outside Herdr's plugin dirs.
+    let base = crate::config::state_dir()?;
     if !base.is_absolute() {
         return None;
     }
@@ -240,7 +239,7 @@ fn cache_path(repo: &GhRepo) -> Option<PathBuf> {
         }
         result
     };
-    Some(base.join("hertrees/pr-v1").join(format!("{}__{}__{}.json",
+    Some(base.join("pr-v1").join(format!("{}__{}__{}.json",
         component(&repo.host), component(&repo.owner), component(&repo.name))))
 }
 

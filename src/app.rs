@@ -655,6 +655,9 @@ impl Picker {
                 Msg::Done(Ok(started)) => return Some(Outcome::Started(started)),
                 Msg::Done(Err(error)) => {
                     self.mode = Mode::List;
+                    // A failure after `worktree.create` (agent start, prompt) still
+                    // left a new checkout: list it, so its agents are not shown under main.
+                    self.reload();
                     self.flash(error, "blocked");
                 }
             }
