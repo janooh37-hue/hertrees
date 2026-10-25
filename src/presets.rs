@@ -179,7 +179,8 @@ mod tests {
     #[test]
     fn files_are_sorted_valid_markdown_and_read_lossily() {
         let tmp = TempDir::new();
-        for name in ["z", "beta", "Beta", "Alpha", "BLANK", "Custom", ".hidden", " spaced "] {
+        // Distinct letters, not case variants: macOS file systems are case-insensitive.
+        for name in ["z", "bravo", "Beta", "Alpha", "BLANK", "Custom", ".hidden", " spaced "] {
             fs::write(path(tmp.path(), name), b" \nfirst\n\nsecond\xff \n").unwrap();
         }
         fs::create_dir(path(tmp.path(), "directory")).unwrap();
@@ -189,9 +190,9 @@ mod tests {
         let presets = files(tmp.path());
         let names: Vec<_> = presets.iter().map(|p| p.name.as_str()).collect();
         #[cfg(unix)]
-        assert_eq!(names, [" spaced ", "Alpha", "Beta", "beta", "linked", "z"]);
+        assert_eq!(names, [" spaced ", "Alpha", "Beta", "bravo", "linked", "z"]);
         #[cfg(not(unix))]
-        assert_eq!(names, [" spaced ", "Alpha", "Beta", "beta", "z"]);
+        assert_eq!(names, [" spaced ", "Alpha", "Beta", "bravo", "z"]);
         assert_eq!(presets[0].prompt.as_deref(), Some("first\n\nsecond�"));
     }
 

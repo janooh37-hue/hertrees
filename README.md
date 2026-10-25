@@ -85,11 +85,23 @@ Everything is optional. Edit `~/.config/herdr/plugins/config/hertrees/config.jso
 - Presets are Markdown files in `<config_dir>/presets/`; `plan.md` and `research.md` are
   seeded on first use. Placeholders: `{branch}` `{base}` `{path}` `{repo}` `{pr}`.
   The preset manager opens `$VISUAL`, then `$EDITOR`, then `nvim` or `vi`.
-- Fonts and icons: everything is plain Unicode by default. Vendor logos before agent rows
-  need the optional "Herdr Agent Icons Max" font (`dist/HerdrAgentIconsMax-Regular.ttf` from
-  [herdr-radar](https://github.com/hhdebb/herdr-radar), not bundled here because its marks
-  are third-party trademarks). It is detected in your user or system font folder (and by `fc-match` on Linux);
-  set `"agent_icons": "font"` when it is only installed on the machine running your terminal.
+- Fonts and icons: everything is plain Unicode by default. For vendor logos before agent
+  rows, install the optional "Herdr Agent Icons Max" font from
+  [herdr-radar](https://github.com/hhdebb/herdr-radar) (not bundled here because its marks
+  are third-party trademarks):
+  [**download HerdrAgentIconsMax-Regular.ttf**](https://raw.githubusercontent.com/hhdebb/herdr-radar/main/dist/HerdrAgentIconsMax-Regular.ttf).
+
+  ```bash
+  # Linux
+  mkdir -p ~/.local/share/fonts && curl -fLo ~/.local/share/fonts/HerdrAgentIconsMax-Regular.ttf \
+    https://raw.githubusercontent.com/hhdebb/herdr-radar/main/dist/HerdrAgentIconsMax-Regular.ttf && fc-cache -f
+  # macOS
+  curl -fLo ~/Library/Fonts/HerdrAgentIconsMax-Regular.ttf \
+    https://raw.githubusercontent.com/hhdebb/herdr-radar/main/dist/HerdrAgentIconsMax-Regular.ttf
+  ```
+
+  Hertrees detects it in your user or system font folder. Set `"agent_icons": "font"` when
+  the font is only installed on the machine running your terminal.
 
 All keys, defaults and colour roles are in [docs/agents.md](docs/agents.md#configuration).
 
