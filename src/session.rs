@@ -1,6 +1,6 @@
 //! Agent launches and checkout navigation through herdr.
 use crate::client::{dict, HerdrClient};
-use crate::model::{PrInfo, Project, Worktree};
+use crate::model::{AgentHere, PrInfo, PrState, Project, Worktree};
 use crate::pyjson::{Map, Value};
 use std::time::{Duration, Instant};
 
@@ -455,10 +455,50 @@ pub fn close_tab(client: &mut HerdrClient, tab: &str) -> Result<(), String> {
     call(client, "tab.close", dict(&[("tab_id", Value::str(tab))]), &["tab", "close", tab]).map(|_| ())
 }
 
+/// Why a worktree cannot be cleaned up now, if anything stops it. `dirty` is
+/// its count of uncommitted changes, None while unknown; `source_checkout` the
+/// checkout the caller works from. The popup and the
+/// `clean` command both refuse on this.
+pub fn cleanup_blocker(wt: &Worktree, source_checkout: &str, agents: &[AgentHere], dirty: Option<u32>) -> Option<String> {
+    if wt.is_main || wt.bare {
+        return Some("the main checkout stays".into());
+    }
+    if wt.prunable {
+        return Some("its folder is missing: git worktree prune clears it".into());
+    }
+    if source_checkout == wt.path {
+        return Some("you are working from it".into());
+    }
+    if agents.iter().any(|agent| matches!(agent.status.as_str(), "working" | "blocked")) {
+        return Some("an agent is still working in it".into());
+    }
+    match dirty {
+        None => Some("its git status is still loading".into()),
+        Some(0) => None,
+        Some(dirty) => Some(format!("it has {} uncommitted change{}", dirty, if dirty == 1 { "" } else { "s" })),
+    }
+}
+
+/// The branch goes too only when GitHub merged it at exactly this commit:
+/// anything committed since, or a PR that was closed, keeps the branch.
+pub fn deletes_branch(wt: &Worktree, info: &PrInfo) -> bool {
+    match (&info.pr, info.state) {
+        (Some(pr), PrState::Merged) => !pr.head_oid.is_empty() && pr.head_oid == wt.head,
+        _ => false,
+    }
+}
+
+/// What `remove_worktree` did: a status line, and whether the branch went.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Removed {
+    pub message: String,
+    pub branch_deleted: bool,
+}
+
 /// Clean up a finished worktree: close its space, remove the checkout, and
 /// with `delete_branch` the local branch too. Never forced: herdr and git both
-/// refuse a checkout with changes. Returns what was done, for the status line.
-pub fn remove_worktree(client: &mut HerdrClient, project: &Project, wt: &Worktree, delete_branch: bool) -> Result<String, String> {
+/// refuse a checkout with changes.
+pub fn remove_worktree(client: &mut HerdrClient, project: &Project, wt: &Worktree, delete_branch: bool) -> Result<Removed, String> {
     if wt.is_main || wt.bare {
         return Err("the main checkout is never removed".into());
     }
@@ -470,13 +510,14 @@ pub fn remove_worktree(client: &mut HerdrClient, project: &Project, wt: &Worktre
         None => git(&project.repo_root, &["worktree", "remove", "--", &wt.path])?,
     }
     let title = wt.title();
-    match (&wt.branch, delete_branch) {
+    let (message, branch_deleted) = match (&wt.branch, delete_branch) {
         (Some(branch), true) => match git(&project.repo_root, &["branch", "-D", "--", branch]) {
-            Ok(()) => Ok(format!("removed {title} and its branch")),
-            Err(error) => Ok(format!("removed {title}; branch kept: {error}")),
+            Ok(()) => (format!("removed {title} and its branch"), true),
+            Err(error) => (format!("removed {title}; branch kept: {error}"), false),
         },
-        _ => Ok(format!("removed {title}")),
-    }
+        _ => (format!("removed {title}"), false),
+    };
+    Ok(Removed { message, branch_deleted })
 }
 
 fn git(repo_root: &str, args: &[&str]) -> Result<(), String> {
@@ -571,7 +612,7 @@ mod tests {
         assert!(std::path::Path::new(&linked).join("notes").exists());
         std::fs::remove_file(format!("{linked}/notes")).unwrap();
 
-        assert_eq!(remove_worktree(&mut client, &project, &wt, true).unwrap(), "removed feat and its branch");
+        assert_eq!(remove_worktree(&mut client, &project, &wt, true).unwrap(), Removed { message: "removed feat and its branch".into(), branch_deleted: true });
         assert!(!std::path::Path::new(&linked).exists());
         let branches = std::process::Command::new("git").args(["-C", repo, "branch", "--list", "feat"]).output().unwrap();
         assert!(branches.stdout.is_empty());

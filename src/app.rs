@@ -1199,34 +1199,13 @@ impl Picker {
 
     /// Why worktree `index` cannot be cleaned up now, if anything stops it.
     fn cleanup_blocker(&self, index: usize) -> Option<String> {
-        let wt = &self.worktrees[index];
-        if wt.is_main || wt.bare {
-            return Some("the main checkout stays".into());
-        }
-        if wt.prunable {
-            return Some("its folder is missing: git worktree prune clears it".into());
-        }
-        if self.project.as_ref().is_some_and(|project| project.source_checkout == wt.path) {
-            return Some("you opened the picker from it".into());
-        }
-        if self.agents[index].iter().any(|agent| matches!(agent.status.as_str(), "working" | "blocked")) {
-            return Some("an agent is still working in it".into());
-        }
-        match self.facts[index].as_ref().and_then(|facts| facts.dirty) {
-            None => Some("its git status is still loading".into()),
-            Some(0) => None,
-            Some(dirty) => Some(format!("it has {} uncommitted change{}", dirty, if dirty == 1 { "" } else { "s" })),
-        }
+        let source = self.project.as_ref().map_or("", |project| project.source_checkout.as_str());
+        let dirty = self.facts[index].as_ref().and_then(|facts| facts.dirty);
+        session::cleanup_blocker(&self.worktrees[index], source, &self.agents[index], dirty)
     }
 
-    /// The branch goes too only when GitHub merged it at exactly this commit:
-    /// anything committed since, or a PR that was closed, keeps the branch.
     fn deletes_branch(&self, index: usize) -> bool {
-        let wt = &self.worktrees[index];
-        match (&self.prs[index].pr, self.prs[index].state) {
-            (Some(pr), PrState::Merged) => !pr.head_oid.is_empty() && pr.head_oid == wt.head,
-            _ => false,
-        }
+        session::deletes_branch(&self.worktrees[index], &self.prs[index])
     }
 
     /// alt+d: clean up the worktree, or close the selected space or tab.
@@ -1320,7 +1299,7 @@ impl Picker {
             let (mut done, mut failed) = (Vec::new(), Vec::new());
             for (wt, delete_branch) in &jobs {
                 match session::remove_worktree(&mut client, &project, wt, *delete_branch) {
-                    Ok(text) => done.push(text),
+                    Ok(removed) => done.push(removed.message),
                     Err(error) => failed.push(format!("{}: {}", wt.title(), error)),
                 }
             }
@@ -3570,7 +3549,7 @@ mod tests {
         assert!(picker.cleanup_blocker(1).unwrap().contains("loading"));
         picker.facts[1] = Some(GitFacts { dirty: Some(0), ..GitFacts::default() });
         picker.project.as_mut().unwrap().source_checkout = "/repo/.worktrees/feat".into();
-        assert!(picker.cleanup_blocker(1).unwrap().contains("opened the picker"));
+        assert!(picker.cleanup_blocker(1).unwrap().contains("working from it"));
         picker.project.as_mut().unwrap().source_checkout = "/repo".into();
 
         // The branch goes only when GitHub merged exactly this commit.
