@@ -65,6 +65,12 @@ bin/hertrees start --cwd /tmp/demo --branch feat/cache --base main \
 bin/hertrees start --cwd /tmp/demo --branch scratch --agent shell --focus
 ```
 
+New worktrees are created at `<repo_root>/.worktrees/<branch>`; branch names with
+slashes keep their directory structure (for example, `/tmp/demo/.worktrees/feat/cache`).
+This uses the main repository root even when `--cwd` points inside a linked checkout.
+Hertrees adds `/.worktrees/` to Git's local `info/exclude` when the directory is not
+already ignored; it does not change or commit your `.gitignore`.
+
 Omitting both prompt options selects `blank`. `--preset NAME` selects a file by its
 case-sensitive name, or `blank`; `custom` requires `--prompt TEXT` instead. `--preset`
 and `--prompt` are mutually exclusive. Both file and direct prompts expand the
@@ -76,8 +82,7 @@ unchanged unless `--focus` is supplied.
 
 `start` returns one object with string fields `workspace_id`, `tab_id`, `pane_id`,
 `agent`, `path`, plus boolean `prompt_deferred`. `agent` is the assigned session name
-(not its kind), or the empty string for a shell; `path` is the actual checkout, including
-when Herdr chose the location for a new branch.
+(not its kind), or the empty string for a shell; `path` is the actual checkout.
 
 `prompt_deferred: true` means the initial prompt is queued for startup readiness,
 not yet acknowledged as submitted. A folder-trust question or slow startup can cause

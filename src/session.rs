@@ -280,24 +280,22 @@ pub fn start_existing(client: &mut HerdrClient, project: &Project, wt: &Worktree
     launch(client, started, branch, kind, prompt, taken_names, progress)
 }
 
-/// `prompt` may still hold `{path}`: the checkout only has a path once herdr made it.
+/// `prompt` may still hold `{path}` until the new checkout has been created.
 pub fn start_new(client: &mut HerdrClient, project: &Project, branch: &str, base: Option<&str>, kind: &str, prompt: Option<&str>, taken_names: &[String], progress: &mut dyn FnMut(&str)) -> Result<Started, String> {
-    validate_branch(&project.repo_root, branch)?;
     progress(&format!("opening {branch}…"));
-    let mut params = dict(&[("cwd", Value::str(&project.repo_root)), ("branch", Value::str(branch)), ("focus", Value::Bool(false))]);
-    let mut argv = vec!["worktree", "create", "--cwd", &project.repo_root, "--branch", branch, "--no-focus"];
-    if let Some(base) = base { if let Value::Dict(map) = &mut params { map.insert("base", Value::str(base)); } argv.extend(["--base", base]); }
-    let result = call(client, "worktree.create", params, &argv)?;
-    let path = id(&result, "worktree", "path")?;
-    let prompt = prompt.map(|p| p.replace("{path}", &path));
-    launch(client, location(&result, &path)?, branch, kind, prompt.as_deref(), taken_names, progress)
+    let started = create_shell(client, project, branch, base)?;
+    let prompt = prompt.map(|p| p.replace("{path}", &started.path));
+    launch(client, started, branch, kind, prompt.as_deref(), taken_names, progress)
 }
 
 /// New worktree with only its shell: no agent. `focus` afterwards shows it.
 pub fn create_shell(client: &mut HerdrClient, project: &Project, branch: &str, base: Option<&str>) -> Result<Started, String> {
     validate_branch(&project.repo_root, branch)?;
-    let mut params = dict(&[("cwd", Value::str(&project.repo_root)), ("branch", Value::str(branch)), ("focus", Value::Bool(false))]);
-    let mut argv = vec!["worktree", "create", "--cwd", &project.repo_root, "--branch", branch, "--no-focus"];
+    let path = crate::project::new_worktree_path(project, branch);
+    let path = path.to_str().ok_or("Worktree path is not valid UTF-8")?;
+    crate::project::ignore_worktrees(&project.repo_root)?;
+    let mut params = dict(&[("cwd", Value::str(&project.repo_root)), ("branch", Value::str(branch)), ("path", Value::str(path)), ("focus", Value::Bool(false))]);
+    let mut argv = vec!["worktree", "create", "--cwd", &project.repo_root, "--branch", branch, "--path", path, "--no-focus"];
     if let Some(base) = base { if let Value::Dict(map) = &mut params { map.insert("base", Value::str(base)); } argv.extend(["--base", base]); }
     let result = call(client, "worktree.create", params, &argv)?;
     location(&result, &id(&result, "worktree", "path")?)
