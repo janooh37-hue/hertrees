@@ -9,7 +9,7 @@ popup, with its pull request state, the agents running in it, and a key to start
 agent session there or in a brand-new worktree. It is a single self-contained binary:
 it needs only Herdr, `git` and, for pull request state, an authenticated `gh`.
 
-<p align="center"><img src="docs/media/demo.gif" alt="Hertrees popup: cycling scopes with Tab, then ^x to create a worktree and choose an agent and preset" width="860"></p>
+<p align="center"><img src="docs/media/demo.gif" alt="Hertrees popup: cycle scopes with Tab, press ^x for a new worktree, pick from 24 supported agents, choose a preset or write and save a custom prompt" width="860"></p>
 
 - **Any project.** The popup shows the repository of the pane you opened it from, even
   from inside a linked worktree. Nothing to configure per repo.
