@@ -1393,8 +1393,7 @@ impl Picker {
         let width = layout.inner_width;
         match &self.mode {
             Mode::List | Mode::Busy(_) => {
-                let placeholder = if width >= 62 { PLACEHOLDER } else { PLACEHOLDER_SHORT };
-                render::render_input(&self.theme, &self.query.text, self.query.cursor, width, placeholder, scope_chip(self.scope), render::PROMPT)
+                render::render_search(&self.theme, &self.query.text, self.query.cursor, width, PLACEHOLDER, PLACEHOLDER_SHORT, scope_chip(self.scope))
             }
             Mode::Branch(edit) => {
                 let base = self.base_branch().unwrap_or_else(|| "HEAD".into());

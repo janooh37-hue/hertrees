@@ -101,7 +101,9 @@ Everything is optional. Edit `~/.config/herdr/plugins/config/hertrees/config.jso
   ```
 
   Hertrees detects it in your user or system font folder. Set `"agent_icons": "font"` when
-  the font is only installed on the machine running your terminal.
+  the font is only installed on the machine running your terminal. When Herdr runs on
+  another machine (SSH, e.g. Termius on iOS), the font is detected on that server, so
+  set `"agent_icons": "off"` if logos show as boxes.
 
 All keys, defaults and colour roles are in [docs/agents.md](docs/agents.md#configuration).
 

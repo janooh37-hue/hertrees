@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- The search line carries the wordmark: `❯ hertrees │ search worktrees…`, "her" in the
+  text colour and "trees" in the idle (leaf) colour, so colour overrides apply. Popups
+  narrower than 60 columns keep the plain prompt.
+
 ## 0.2.2 (2026-10-25)
 
 - The PR cache and deferred prompt files live in Herdr's plugin state directory
