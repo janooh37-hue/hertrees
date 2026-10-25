@@ -8,7 +8,7 @@ Examples below use `bin/hertrees` and an example repository at `/tmp/demo`; subs
 real paths and installed agent kinds. Session commands require a running Herdr server.
 
 For exact interfaces, inspect `src/cli.rs` (`list`, `print_presets`, `parse_start`,
-`start`), `src/presets.rs` (files and names), and `src/config.rs` (lookup and keys).
+`start`, `send`), `src/presets.rs` (files and names), and `src/config.rs` (lookup and keys).
 These are authoritative if an installed binary differs from this guide. Headless commands
 print JSON to stdout; command errors use exit status **2** and stderr prefixed `hertrees:`.
 Parse JSON rather than scraping the popup. Exit status 0 from `start` reports a launched
@@ -41,11 +41,13 @@ Choose an existing checkout by its returned `path`, not its branch label. For
 bin/hertrees presets
 ```
 
-Returns `{"dir": "/…/presets", "presets": […]}`. Each entry has `name`, `path` and
-`prompt` strings; `prompt` is the unexpanded template. `dir` can be null if no config
-location is available. This command lists only file presets, not the built-in `blank`
-(no first prompt) or `custom` (interactive input) choices. It may seed the initial
-files as described under [preset files](#preset-files).
+Returns `{"dir": "/…/presets", "repo_dir": "/…/.hertrees/presets", "presets": […]}`.
+Each entry has `name`, `path` and `prompt` strings (`prompt` is the unexpanded template,
+without its settings block), booleans `repo` (from the repository's `repo_dir`) and `ask`,
+and `agent`/`description` strings or null. `dir` can be null if no config location is
+available; `repo_dir` is null outside a git repository. This command lists only file
+presets, not the built-in `blank` (no first prompt) or `custom` (interactive input)
+choices. It may seed the initial files as described under [preset files](#preset-files).
 
 ## Start a session
 
@@ -74,9 +76,11 @@ Hertrees adds `/.worktrees/` to Git's local `info/exclude` when the directory is
 already ignored; it does not change or commit your `.gitignore`.
 
 Omitting both prompt options selects `blank`. `--preset NAME` selects a file by its
-case-sensitive name, or `blank`; `custom` requires `--prompt TEXT` instead. `--preset`
-and `--prompt` are mutually exclusive. Both file and direct prompts expand the
-[placeholders](#placeholders). `--agent shell` is only valid with `--branch`; leave
+case-sensitive name, or `blank`; `custom` requires `--prompt TEXT`. Given both, `--prompt`
+is added to the preset the way the popup's editor adds it: at the preset's `{input}`,
+otherwise below it after a blank line. The result expands the
+[placeholders](#placeholders); a placeholder the prompt defines itself (`{ticket}`)
+needs `--var ticket=VALUE`, and a missing one is an error naming each `--var` required. `--agent shell` is only valid with `--branch`; leave
 prompt options off because a shell has no agent to receive them. Focus remains
 unchanged unless `--focus` is supplied.
 
@@ -94,10 +98,40 @@ resubmitting it yourself. The sender stops if the agent disappears or after 15 m
 so this flag is not a delivery guarantee. `false` means no prompt was requested or
 submission succeeded; it is not evidence that the task finished.
 
+## Prompt a running agent
+
+```sh
+bin/hertrees send --cwd /tmp/demo --agent claude-feat-cache --preset review --prompt 'focus on errors'
+```
+
+`--agent` is a running agent's herdr name (as in `--list` or `herdr agent list`) or its
+pane id, and must belong to the project at `--cwd`. `--preset`, `--prompt` and `--var`
+work as for `start` (at least one of the first two), with placeholders filled for that
+agent's worktree. It returns `{"agent": NAME, "deferred": BOOL}`. `deferred: false` means
+the agent was idle and started working on it; `true` means it was busy or waiting on a
+question, and a detached sender delivers the prompt once it is idle (it stops after 15
+minutes or if the agent exits). The popup's `^s` does the same.
+
 ## Preset files
 
 Treat presets as user-owned Markdown files: `<config_dir>/presets/<name>.md`, with the
-whole file as the prompt (no frontmatter required). Internal newlines are preserved;
+whole file as the prompt, after an optional settings block:
+
+```markdown
+---
+ask: true
+agent: codex
+description: one line shown in the preset manager
+---
+Prompt text…
+```
+
+`ask: true` (also `yes`/`on`) makes the popup's `⏎` open the prompt editor under the
+preset; a preset containing `{input}` does that too. `agent` selects that agent first in
+the popup. Unknown keys are ignored, and a file without a closing `---` is all prompt.
+A repository can share presets in `<repo_root>/.hertrees/presets/` (the `repo_dir` of
+`presets`); they are listed with `repo: true`, and a user preset with the same name
+(case-insensitively) hides the repository's. Internal newlines are preserved;
 outer whitespace is trimmed on load. Read the `dir` from `presets` rather than guessing
 the user's config path. To create a preset there, write a new file without overwriting
 an existing name; edit its content, rename the file, or delete it with normal file
@@ -130,9 +164,17 @@ them sticks. An existing empty directory stays empty. Built-in choices are not f
 | `{path}` | Actual destination checkout path |
 | `{repo}` | Repository name, not its filesystem root |
 | `{pr}` | `#N URL` when available, otherwise `none` |
+| `{pr_title}` | The PR's title, otherwise `none` |
+| `{pr_body}` | The PR's description (`gh pr view`), `none`, or `unavailable` |
+| `{commits}` | `git log --oneline base..HEAD` (at most 50), `none` for a new worktree |
+| `{diffstat}` | `git diff --stat base...HEAD`, `none` for a new worktree |
+| `{input}` | Where `--prompt` (or the popup editor's text) goes inside a preset |
 
-Other brace expressions are left alone. `{pr}` being `none` does not distinguish a
-failed lookup from absence; use the discovery JSON for that distinction.
+`{pr_body}`, `{commits}` and `{diffstat}` run only when a prompt uses them; `unavailable`
+means the command failed. Any other `{name}` (a lowercase letter, then lowercase letters,
+digits or `_`) is a field: the popup asks for it, headless commands need `--var`. Other
+brace expressions (JSON, `{ spaced }`, `{Upper}`) are left alone. `{pr}` being `none`
+does not distinguish a failed lookup from absence; use the discovery JSON for that.
 
 ## Configuration
 
@@ -142,8 +184,8 @@ failed lookup from absence; use the discovery JSON for that distinction.
 2. `$XDG_CONFIG_HOME/herdr/plugins/config/hertrees` when `XDG_CONFIG_HOME` is nonempty.
 3. `~/.config/herdr/plugins/config/hertrees`.
 
-Hertrees writes its private state (the PR cache in `pr-v1/`, and short-lived deferred
-prompt files) to `HERDR_PLUGIN_STATE_DIR`, otherwise `$XDG_STATE_HOME/herdr/plugins/hertrees`
+Hertrees writes its private state (the PR cache in `pr-v1/`, short-lived deferred
+prompt files, and the popup editor's last 50 prompts in `prompt-history.json`) to `HERDR_PLUGIN_STATE_DIR`, otherwise `$XDG_STATE_HOME/herdr/plugins/hertrees`
 or `~/.local/state/herdr/plugins/hertrees`. Outside these two plugin directories it only
 creates worktrees and the `/.worktrees/` entry in Git's local `info/exclude`.
 
@@ -185,5 +227,6 @@ Colors accept ANSI names, 0–255 palette indices, or `#RRGGBB`. For a minimal e
 - **Links:** the `#N` chip is an OSC 8 hyperlink and a click target; the preview shows the PR
   title and URL.
 - **New sessions:** `^t` opens a new tab if the worktree's workspace is already open. Pick the
-  agent, then `⇥` cycles presets; `^e` manages them and `^s` saves a custom prompt. If the agent
+  agent, then `⇥` cycles presets, `⏎` sends one as is and `^o` adds your own text under it;
+  `^e` manages presets. `^s` on a worktree sends a preset or prompt to its running agent. If the agent
   stops at a startup question (Claude's folder-trust prompt), the prompt waits until you answer.

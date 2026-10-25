@@ -55,6 +55,7 @@ Needs Herdr 0.9.3+ on Linux or macOS, `git`, and an authenticated `gh` for PR st
 | `↑↓` `^p` `^n` `^k` `^j` `PgUp` `PgDn` | move |
 | `⏎` / click selected row | focus the worktree's workspace, opening it if needed |
 | `^t` | new agent session in the selected worktree |
+| `^s` | send a preset or prompt to an agent already running in the selected worktree |
 | `^x` | new worktree: branch name → agent (or shell) → preset |
 | `^b` / click `#N` | open the PR in the browser |
 | `⇥` `⇧⇥` | scope: everything → no PR → open → draft → merged → closed → agents |
@@ -64,9 +65,35 @@ Needs Herdr 0.9.3+ on Linux or macOS, `git`, and an authenticated `gh` for PR st
 | `^u` `^w` `^a` `^e` `^d` | clear, delete word, home, end, delete forward |
 | `esc` | back / close |
 
-In the agent picker, `⇥` cycles the preset, `⏎` starts and `^e` manages presets (`⏎` edits,
-`^x` creates, `^r` renames, `⌦`/`^d` deletes). In the Custom prompt editor, `^s` saves the
-prompt as a named preset.
+In the agent picker, `⇥` cycles the preset, `⏎` sends it as is, `^o` opens the prompt
+editor to add your own text under it, and `^e` manages presets (`⏎` edits, `^x` creates,
+`^r` renames, `⌦`/`^d` deletes).
+
+The prompt editor shows the preset dimmed above your text. `⏎` sends, `^j` or `alt+⏎`
+starts a new line, `⇥` completes a `{placeholder}` (type `{bra` then `⇥`, or `⇥` alone to
+pick from the list), `↑`/`↓` bring back earlier prompts and `^s` saves the result as a
+preset. If a prompt uses a placeholder of its own, such as `{ticket}`, the popup asks for
+its value before sending.
+
+### Presets
+
+Presets are Markdown files in `<config_dir>/presets/` (`plan.md` and `research.md` are
+seeded on first use). A repository can share its own in `.hertrees/presets/`; yours win
+on a name clash. An optional block at the top sets how a preset behaves:
+
+```markdown
+---
+ask: true            # ⏎ opens the editor so you add text every time
+agent: codex         # the agent chosen first with this preset
+description: house rules, then your task
+---
+Follow the conventions in AGENTS.md. Run the tests before you finish.
+```
+
+Put `{input}` in a preset to place your text there instead of below it, e.g.
+`Task: {input}` followed by rules. Placeholders: `{branch}` `{base}` `{path}` `{repo}`
+`{pr}` `{pr_title}` `{pr_body}` `{commits}` `{diffstat}` `{input}`, plus any `{name}`
+of your own, which the popup asks you to fill in.
 
 ## Configuration
 
@@ -86,9 +113,8 @@ Everything is optional. Edit `~/.config/herdr/plugins/config/hertrees/config.jso
 - `wordmark`: `"search"` (default, `❯ hertrees │` on the search line), `"pixel"`,
   `"pixel-small"`, `"braille"`, `"sextant"` or `"icon"` (pixel lettering above it), or `"off"`.
   `^l` in the popup steps through them and saves the choice here.
-- Presets are Markdown files in `<config_dir>/presets/`; `plan.md` and `research.md` are
-  seeded on first use. Placeholders: `{branch}` `{base}` `{path}` `{repo}` `{pr}`.
-  The preset manager opens `$VISUAL`, then `$EDITOR`, then `nvim` or `vi`.
+- Presets: see [Presets](#presets). The preset manager opens `$VISUAL`, then `$EDITOR`,
+  then `nvim` or `vi`.
 - Fonts and icons: everything is plain Unicode by default. For vendor logos before agent
   rows, install the optional "Herdr Agent Icons Max" font from
   [herdr-radar](https://github.com/hhdebb/herdr-radar) (not bundled here because its marks
@@ -116,6 +142,9 @@ All keys, defaults and colour roles are in [docs/agents.md](docs/agents.md#confi
 ```bash
 bin/hertrees --list --cwd /path/to/repo   # worktrees, PR state and agents as JSON
 bin/hertrees start --cwd /path/to/repo --branch feat/cache --agent claude --preset plan
+bin/hertrees start --cwd /path/to/repo --path /path/to/repo --agent claude \
+  --preset rules --prompt 'fix the login bug' --var ticket=HT-42
+bin/hertrees send --cwd /path/to/repo --agent claude-main --prompt 'run the tests'
 bin/hertrees --help                       # all flags
 bin/hertrees --version                    # version, under the pixel mark on a terminal
 ```

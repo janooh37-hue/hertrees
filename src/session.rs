@@ -23,17 +23,124 @@ pub fn installed_agents(preferred: &[String]) -> Vec<String> {
     result
 }
 
+/// Placeholders hertrees fills itself, with what each becomes. Any other
+/// `{name}` in a prompt is a field the user types a value for before it is sent.
+pub const PLACEHOLDERS: &[(&str, &str)] = &[
+    ("input", "your own text, where the preset puts it"),
+    ("branch", "the worktree's branch"),
+    ("base", "the branch it was made from"),
+    ("path", "the worktree's directory"),
+    ("repo", "the repository's name"),
+    ("pr", "#number and URL, or none"),
+    ("pr_title", "the pull request's title"),
+    ("pr_body", "the pull request's description"),
+    ("commits", "the branch's commits since base"),
+    ("diffstat", "files changed since base"),
+];
+
+/// Filled only when a prompt uses them, at start time: they run git or gh.
+const LAZY: &[&str] = &["pr_body", "commits", "diffstat"];
+
+/// Placeholder values by name; names not set here stay as typed.
 #[derive(Clone, Debug, Default)]
-pub struct PromptVars { pub branch: String, pub base: String, pub path: String, pub repo: String, pub pr: String }
+pub struct PromptVars {
+    values: Vec<(String, String)>,
+}
+
+impl PromptVars {
+    pub fn get(&self, name: &str) -> Option<&str> {
+        self.values.iter().find(|(key, _)| key == name).map(|(_, value)| value.as_str())
+    }
+
+    pub fn set(&mut self, name: &str, value: impl Into<String>) {
+        let value = value.into();
+        match self.values.iter_mut().find(|(key, _)| key == name) {
+            Some(slot) => slot.1 = value,
+            None => self.values.push((name.to_string(), value)),
+        }
+    }
+}
 
 /// Shared picker/CLI variables; a new checkout keeps `{path}` until creation.
 pub fn prompt_vars(project: &Project, wt: &Worktree, base: Option<&str>, info: Option<&PrInfo>) -> PromptVars {
-    PromptVars {
-        branch: wt.title(),
-        base: base.or(project.default_branch.as_deref()).unwrap_or("HEAD").into(),
-        path: wt.path.clone(),
-        repo: project.repo_name.clone(),
-        pr: info.and_then(|info| info.pr.as_ref()).map(|pr| format!("#{} {}", pr.number, pr.url)).unwrap_or_else(|| "none".into()),
+    let pr = info.and_then(|info| info.pr.as_ref());
+    let mut vars = PromptVars::default();
+    vars.set("branch", wt.title());
+    vars.set("base", base.or(project.default_branch.as_deref()).unwrap_or("HEAD"));
+    vars.set("path", wt.path.clone());
+    vars.set("repo", project.repo_name.clone());
+    vars.set("pr", pr.map(|pr| format!("#{} {}", pr.number, pr.url)).unwrap_or_else(|| "none".into()));
+    vars.set("pr_title", pr.map(|pr| pr.title.clone()).unwrap_or_else(|| "none".into()));
+    vars
+}
+
+/// Fill the git/gh placeholders `prompt` uses. A checkout that does not
+/// exist yet (a new worktree) has no commits, changes or PR of its own.
+pub fn fill_lazy(vars: &mut PromptVars, prompt: &str, checkout: Option<&str>, pr_url: Option<&str>) {
+    let used = names(prompt);
+    let base = vars.get("base").unwrap_or("HEAD").to_string();
+    let run = |argv: &[&str]| -> Option<String> {
+        let argv: Vec<String> = argv.iter().map(|arg| (*arg).to_owned()).collect();
+        let output = crate::proc::run(&argv, 15.0).ok().filter(|output| output.success)?;
+        Some(String::from_utf8_lossy(&output.stdout).trim_end().to_string())
+    };
+    for name in LAZY.iter().filter(|name| used.iter().any(|used| used == *name)) {
+        let value = match (*name, checkout, pr_url) {
+            ("commits", Some(path), _) => run(&["git", "-C", path, "log", "--oneline", "--no-decorate", "-n", "50", &format!("{base}..HEAD")]),
+            ("diffstat", Some(path), _) => run(&["git", "-C", path, "diff", "--stat", &format!("{base}...HEAD")]),
+            ("pr_body", _, Some(url)) => run(&["gh", "pr", "view", url, "--json", "body", "--jq", ".body"]),
+            _ => Some(String::new()),
+        };
+        let value = match value {
+            Some(text) if text.trim().is_empty() => "none".to_string(),
+            Some(text) => text,
+            None => "unavailable".to_string(),
+        };
+        vars.set(name, value);
+    }
+}
+
+/// `{name}` tokens: a lowercase letter, then letters, digits or `_`. Braces
+/// around anything else (JSON, code, `{ spaced }`) are plain text.
+fn token(rest: &str) -> Option<&str> {
+    let inner = rest.strip_prefix('{')?;
+    let end = inner.find('}')?;
+    let name = &inner[..end];
+    let mut chars = name.chars();
+    let valid = chars.next().is_some_and(|c| c.is_ascii_lowercase())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+    valid.then_some(name)
+}
+
+/// Every placeholder name in `template`, once each, in order of appearance.
+pub fn names(template: &str) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for (index, _) in template.match_indices('{') {
+        if let Some(name) = token(&template[index..]) {
+            if !found.iter().any(|known| known == name) {
+                found.push(name.to_string());
+            }
+        }
+    }
+    found
+}
+
+/// The names in `template` hertrees cannot fill: the user types these.
+pub fn fields(template: &str) -> Vec<String> {
+    names(template).into_iter().filter(|name| !PLACEHOLDERS.iter().any(|(known, _)| known == name)).collect()
+}
+
+/// A preset plus the user's own text: at `{input}` when the preset has it,
+/// else below the preset after a blank line.
+pub fn compose(template: &str, addition: &str) -> String {
+    let addition = addition.trim();
+    if template.contains("{input}") {
+        return template.replace("{input}", addition);
+    }
+    match (template.trim_end(), addition) {
+        (template, "") => template.to_string(),
+        ("", addition) => addition.to_string(),
+        (template, addition) => format!("{template}\n\n{addition}"),
     }
 }
 
@@ -44,11 +151,16 @@ pub fn expand_prompt(template: &str, vars: &PromptVars) -> String {
     while let Some(start) = rest.find('{') {
         out.push_str(&rest[..start]);
         rest = &rest[start..];
-        let replacements = [("{branch}", &vars.branch), ("{base}", &vars.base), ("{path}", &vars.path), ("{repo}", &vars.repo), ("{pr}", &vars.pr)];
-        if let Some((token, value)) = replacements.iter().find(|(token, _)| rest.starts_with(token)) {
-            out.push_str(value);
-            rest = &rest[token.len()..];
-        } else { out.push('{'); rest = &rest[1..]; }
+        match token(rest).and_then(|name| Some((name.len() + 2, vars.get(name)?))) {
+            Some((length, value)) => {
+                out.push_str(value);
+                rest = &rest[length..];
+            }
+            None => {
+                out.push('{');
+                rest = &rest[1..];
+            }
+        }
     }
     out.push_str(rest);
     out
@@ -144,6 +256,17 @@ fn send_prompt(client: &mut HerdrClient, agent: &str, prompt: &str) -> Result<()
     );
     client.timeout = old_timeout;
     result.map(|_| ())
+}
+
+/// Prompt an agent that is already running. An idle agent gets it now; a busy
+/// one, or one waiting on a question, gets it from the detached sender once it
+/// is idle again. Returns whether delivery was deferred.
+pub fn send_to(client: &mut HerdrClient, agent: &str, prompt: &str) -> Result<bool, String> {
+    match wait_ready(client, agent, Duration::from_secs(1)) {
+        Readiness::Ready => send_prompt(client, agent, prompt).map(|()| false),
+        Readiness::Gone => Err("that agent is no longer running".into()),
+        Readiness::Blocked | Readiness::NotYet => defer_prompt(agent, prompt).map(|()| true),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -335,8 +458,35 @@ mod tests {
         assert_eq!(agent_name("omp", "main", &["omp-main".into(), "omp-main-2".into()]), "omp-main-3");
     }
     #[test]
+    fn names_fields_and_compose() {
+        let template = "Fix {ticket} on {branch} ({ticket}). JSON {\"a\": 1} and { spaced } and {Upper} stay.";
+        assert_eq!(names(template), ["ticket", "branch"]);
+        assert_eq!(fields(template), ["ticket"]);
+        assert_eq!(compose("Rules.\n", "  do it  "), "Rules.\n\ndo it");
+        assert_eq!(compose("Rules.", ""), "Rules.");
+        assert_eq!(compose("", "only mine"), "only mine");
+        assert_eq!(compose("Task: {input}\nThen {input} again", " x "), "Task: x\nThen x again");
+        assert_eq!(compose("Task: {input}", ""), "Task: ");
+    }
+
+    #[test]
+    fn lazy_placeholders_run_only_when_used() {
+        let mut vars = PromptVars::default();
+        vars.set("base", "main");
+        fill_lazy(&mut vars, "{branch} only", Some("/nonexistent"), None);
+        assert_eq!(vars.get("commits"), None);
+        fill_lazy(&mut vars, "{commits} {diffstat} {pr_body}", None, None);
+        assert_eq!((vars.get("commits"), vars.get("diffstat"), vars.get("pr_body")), (Some("none"), Some("none"), Some("none")));
+        fill_lazy(&mut vars, "{commits}", Some("/nonexistent/checkout"), None);
+        assert_eq!(vars.get("commits"), Some("unavailable"));
+    }
+
+    #[test]
     fn prompts_preserve_unknown_and_do_not_reexpand() {
-        let vars = PromptVars { branch: "feature/{base}".into(), base: "main".into(), path: "/tmp/repo".into(), repo: "repo".into(), pr: "none".into() };
+        let mut vars = PromptVars::default();
+        for (name, value) in [("branch", "feature/{base}"), ("base", "main"), ("path", "/tmp/repo"), ("repo", "repo"), ("pr", "none")] {
+            vars.set(name, value);
+        }
         assert_eq!(expand_prompt("{branch} {base} {path} {repo} {pr} {unknown} {", &vars), "feature/{base} main /tmp/repo repo none {unknown} {");
         assert_eq!(expand_prompt("", &vars), "");
     }

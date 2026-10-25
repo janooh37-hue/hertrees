@@ -10,8 +10,10 @@ or configure it, read [docs/agents.md](docs/agents.md). This file is for changin
 - `src/project.rs`: focused-pane context, repository discovery, worktrees, local Git facts,
   and joining agents to checkouts.
 - `src/pr.rs`: GitHub lookup, branch matching, PR classification and disk cache.
-- `src/session.rs`: worktree open/create, fresh sessions, readiness, deferred prompt delivery.
-- `src/presets.rs`: prompt files, initial seeding, name validation and editor invocation.
+- `src/session.rs`: worktree open/create, fresh sessions, readiness, deferred prompt delivery,
+  placeholders (`compose`, `fields`, `fill_lazy`) and prompting running agents (`send_to`).
+- `src/presets.rs`: prompt files and their settings block, repository presets, initial seeding,
+  name validation, prompt-editor history and editor invocation.
 - `src/config.rs`: configuration lookup and defaults.
 - `src/render.rs`, `src/paint.rs`, `src/theme.rs`, `src/icons.rs`: bar-style layout,
   terminal painting, colors, agent glyphs and OSC 8 links.

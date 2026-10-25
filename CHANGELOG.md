@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.2.4 (2026-10-25)
+
+- Add your own text to a preset: `^o` in the agent picker opens the prompt editor with
+  the preset shown dimmed above it; `⏎` sends the preset, a blank line, then your text.
+  A preset with `{input}` takes your text there instead.
+- The prompt editor is multi-line (`^j` or `alt+⏎`; pasted line breaks are kept),
+  completes placeholders with `⇥`, and recalls earlier prompts with `↑`/`↓`
+  (`prompt-history.json` in the plugin state directory).
+- Presets can start with a settings block: `ask: true` makes `⏎` open the editor,
+  `agent:` picks that agent first, `description:` shows in the preset manager.
+- Repository presets in `.hertrees/presets/`, shared through git, marked `repo`; your own
+  preset wins a name clash.
+- New placeholders: `{pr_title}`, `{pr_body}`, `{commits}`, `{diffstat}` and `{input}`.
+  Any other `{name}` is a field the popup asks you to fill in before sending.
+- `^s` sends a preset or prompt to the agent already running in a worktree; a busy agent
+  gets it once it is idle. Headless: `hertrees send --agent NAME …`.
+- `hertrees start` accepts `--preset` with `--prompt` (combined as in the editor) and
+  `--var NAME=VALUE`; `hertrees presets` also lists the repository's presets.
+
 ## 0.2.3 (2026-10-25)
 
 - The search line carries the wordmark: `❯ hertrees │ search worktrees…`, "her" in the

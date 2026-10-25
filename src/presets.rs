@@ -12,15 +12,66 @@ pub const CUSTOM: &str = "custom";
 const PLAN_PROMPT: &str = "You are in the git worktree {path} (repo {repo}, branch {branch}, base {base}, PR {pr}).\n\nStudy the code and this branch's changes against {base}, then write a step-by-step implementation plan to PLAN.md: goal, steps, files to touch, risks, and how to verify.\nDo not change code yet; wait for my review.\n";
 const RESEARCH_PROMPT: &str = "You are in the git worktree {path} (repo {repo}, branch {branch}, base {base}, PR {pr}).\n\nResearch the codebase for this branch's work: map the relevant modules and data flow, note constraints and open questions, and write the findings to RESEARCH.md with file:line references.\nDo not change code.\n";
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Preset {
     pub name: String,
     pub prompt: Option<String>,
     pub path: Option<PathBuf>,
+    /// `ask: true`: ⏎ opens the prompt editor under this preset instead of sending it.
+    pub ask: bool,
+    /// `agent: KIND`: the agent selected first while this preset is chosen.
+    pub agent: Option<String>,
+    pub description: Option<String>,
+    /// From the repository's `.hertrees/presets/`, not the user's own directory.
+    pub repo: bool,
 }
 
 pub fn dir() -> Option<PathBuf> {
     config::config_dir().map(|directory| directory.join("presets"))
+}
+
+/// A repository's shared presets, committed with it.
+pub fn repo_dir(repo_root: &str) -> PathBuf {
+    Path::new(repo_root).join(".hertrees").join("presets")
+}
+
+/// Split an optional settings block off the prompt:
+///
+/// ```text
+/// ---
+/// ask: true
+/// agent: codex
+/// description: one line for the picker
+/// ---
+/// prompt…
+/// ```
+///
+/// Unknown keys are ignored; without a closing `---` the whole file is the prompt.
+fn parse(content: &str, preset: &mut Preset) -> String {
+    let content = content.trim_start_matches('\u{feff}');
+    let mut lines = content.split_inclusive('\n');
+    if lines.next().map(str::trim) == Some("---") {
+        let mut offset = content.find('\n').map(|i| i + 1).unwrap_or(content.len());
+        let mut settings = Vec::new();
+        for line in lines {
+            offset += line.len();
+            if line.trim() == "---" {
+                for (key, value) in settings {
+                    match key {
+                        "ask" => preset.ask = matches!(value, "true" | "yes" | "on"),
+                        "agent" => preset.agent = Some(value.to_ascii_lowercase()).filter(|v| !v.is_empty()),
+                        "description" => preset.description = Some(value.to_string()).filter(|v| !v.is_empty()),
+                        _ => {}
+                    }
+                }
+                return content[offset..].trim().to_string();
+            }
+            if let Some((key, value)) = line.split_once(':') {
+                settings.push((key.trim(), value.trim()));
+            }
+        }
+    }
+    content.trim().to_string()
 }
 
 /// Seed once, not on every load: removing either default is a lasting choice.
@@ -50,21 +101,36 @@ pub fn files(dir: &Path) -> Vec<Preset> {
         }
         let stem = path.file_stem()?.to_str()?;
         check_name(stem).ok()?;
-        let name = stem.to_string();
+        let mut preset = Preset { name: stem.to_string(), ..Preset::default() };
         let content = fs::read(&path).ok()?;
-        Some(Preset { name, prompt: Some(String::from_utf8_lossy(&content).trim().to_string()), path: Some(path) })
+        preset.prompt = Some(parse(&String::from_utf8_lossy(&content), &mut preset));
+        preset.path = Some(path);
+        Some(preset)
     }).collect();
     presets.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then_with(|| a.name.cmp(&b.name)));
     presets
 }
 
-pub fn load(dir: Option<&Path>) -> Vec<Preset> {
-    let mut presets = vec![Preset { name: BLANK.into(), prompt: Some(String::new()), path: None }];
+/// Blank, the user's presets and the repository's (the user's win a name
+/// clash), then Custom.
+pub fn load(dir: Option<&Path>, repo_root: Option<&str>) -> Vec<Preset> {
+    let mut found = Vec::new();
     if let Some(dir) = dir {
         let _ = seed(dir);
-        presets.extend(files(dir));
+        found = files(dir);
     }
-    presets.push(Preset { name: CUSTOM.into(), prompt: None, path: None });
+    if let Some(root) = repo_root.filter(|root| !root.is_empty()) {
+        for mut preset in files(&repo_dir(root)) {
+            if !found.iter().any(|own: &Preset| own.name.eq_ignore_ascii_case(&preset.name)) {
+                preset.repo = true;
+                found.push(preset);
+            }
+        }
+    }
+    found.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then_with(|| a.name.cmp(&b.name)));
+    let mut presets = vec![Preset { name: BLANK.into(), prompt: Some(String::new()), ..Preset::default() }];
+    presets.extend(found);
+    presets.push(Preset { name: CUSTOM.into(), ..Preset::default() });
     presets
 }
 
@@ -144,6 +210,40 @@ pub fn delete(dir: &Path, name: &str) -> Result<(), String> {
     fs::remove_file(path(dir, name)).map_err(|error| error.to_string())
 }
 
+const HISTORY_LIMIT: usize = 50;
+
+fn history_path() -> Option<PathBuf> {
+    config::state_dir().map(|dir| dir.join("prompt-history.json"))
+}
+
+/// Texts typed in the popup's prompt editor, oldest first.
+pub fn history() -> Vec<String> {
+    let Some(text) = history_path().and_then(|path| fs::read_to_string(path).ok()) else { return Vec::new() };
+    match crate::pyjson::loads(&text) {
+        Ok(crate::pyjson::Value::List(items)) => items.iter().filter_map(|item| item.as_str()).map(str::to_owned).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Keep `text` as the newest history entry: once, at most `HISTORY_LIMIT` kept.
+pub fn remember(text: &str) {
+    let text = text.trim();
+    let Some(path) = history_path().filter(|_| !text.is_empty()) else { return };
+    let mut entries = history();
+    entries.retain(|entry| entry != text);
+    entries.push(text.to_string());
+    let skip = entries.len().saturating_sub(HISTORY_LIMIT);
+    let list = crate::pyjson::Value::List(entries.into_iter().skip(skip).map(crate::pyjson::Value::Str).collect());
+    let Some(parent) = path.parent() else { return };
+    let temporary = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    let written = fs::create_dir_all(parent)
+        .and_then(|()| fs::write(&temporary, crate::pyjson::dumps(&list, false)))
+        .and_then(|()| fs::rename(&temporary, &path));
+    if written.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+}
+
 pub fn open_editor(path: &Path) -> Result<(), String> {
     let editor = ["VISUAL", "EDITOR"].iter().find_map(|key| std::env::var(key).ok().filter(|value| !value.trim().is_empty()))
         .unwrap_or_else(|| {
@@ -167,9 +267,9 @@ mod tests {
     fn defaults_are_seeded_only_for_a_missing_directory() {
         let tmp = TempDir::new();
         let dir = tmp.path().join("presets");
-        assert_eq!(load(Some(&dir)).iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["blank", "plan", "research", "custom"]);
+        assert_eq!(load(Some(&dir), None).iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["blank", "plan", "research", "custom"]);
         delete(&dir, "plan").unwrap();
-        assert_eq!(load(Some(&dir)).iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["blank", "research", "custom"]);
+        assert_eq!(load(Some(&dir), None).iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["blank", "research", "custom"]);
         let existing = tmp.path().join("existing");
         fs::create_dir(&existing).unwrap();
         seed(&existing).unwrap();
@@ -194,6 +294,36 @@ mod tests {
         #[cfg(not(unix))]
         assert_eq!(names, [" spaced ", "Alpha", "Beta", "bravo", "z"]);
         assert_eq!(presets[0].prompt.as_deref(), Some("first\n\nsecond�"));
+    }
+
+    #[test]
+    fn a_settings_block_sets_ask_agent_and_description() {
+        let tmp = TempDir::new();
+        fs::write(path(tmp.path(), "rules"), "---\nask: true\nagent: Codex\ndescription: house rules\nother: x\n---\n\nFollow the rules.\n").unwrap();
+        fs::write(path(tmp.path(), "plain"), "---\nnot closed\nstill prompt").unwrap();
+        fs::write(path(tmp.path(), "quiet"), "---\nask: no\n---\nhello").unwrap();
+        let presets = files(tmp.path());
+        let rules = presets.iter().find(|p| p.name == "rules").unwrap();
+        assert_eq!((rules.ask, rules.agent.as_deref(), rules.description.as_deref()), (true, Some("codex"), Some("house rules")));
+        assert_eq!(rules.prompt.as_deref(), Some("Follow the rules."));
+        let plain = presets.iter().find(|p| p.name == "plain").unwrap();
+        assert_eq!((plain.ask, plain.prompt.as_deref()), (false, Some("---\nnot closed\nstill prompt")));
+        let quiet = presets.iter().find(|p| p.name == "quiet").unwrap();
+        assert_eq!((quiet.ask, quiet.prompt.as_deref()), (false, Some("hello")));
+    }
+
+    #[test]
+    fn repository_presets_join_the_list_and_lose_name_clashes() {
+        let tmp = TempDir::new();
+        let own = tmp.path().join("own");
+        fs::create_dir(&own).unwrap();
+        create(&own, "review", "mine").unwrap();
+        let root = tmp.path().join("repo");
+        create(&repo_dir(root.to_str().unwrap()), "Review", "theirs").unwrap();
+        create(&repo_dir(root.to_str().unwrap()), "conventions", "shared").unwrap();
+        let presets = load(Some(&own), root.to_str());
+        let summary: Vec<_> = presets.iter().map(|p| (p.name.as_str(), p.prompt.as_deref(), p.repo)).collect();
+        assert_eq!(summary, [("blank", Some(""), false), ("conventions", Some("shared"), true), ("review", Some("mine"), false), ("custom", None, false)]);
     }
 
     #[test]

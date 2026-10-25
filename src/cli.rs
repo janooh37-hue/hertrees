@@ -23,7 +23,8 @@ pub const USAGE: &str = "hertrees - every worktree of a project, its pull reques
 usage: hertrees [options]
        hertrees presets
        hertrees start [--cwd PATH] (--path CHECKOUT | --branch NEW [--base REF])
-                      --agent KIND [--preset NAME | --prompt TEXT] [--focus]
+                      --agent KIND [--preset NAME] [--prompt TEXT] [--var NAME=VALUE]… [--focus]
+       hertrees send [--cwd PATH] --agent NAME [--preset NAME] [--prompt TEXT] [--var NAME=VALUE]…
 
 options:
   --open           open the picker popup through the Herdr CLI
@@ -33,14 +34,19 @@ options:
   --help           show this message
 
 subcommands:
-  presets          print the preset directory and file templates as JSON
+  presets          print the preset directories and templates (yours and the repo's) as JSON
   start            start an installed agent in an existing or new worktree
     --agent KIND   agent kind, or shell (new worktree only)
-    --preset NAME  file preset or blank; custom requires --prompt instead
-    --prompt TEXT  first prompt; expands {branch}, {base}, {path}, {repo}, {pr}
+    --preset NAME  file preset or blank; custom requires --prompt
+    --prompt TEXT  first prompt, or text added to --preset (at {input}, else below it)
+    --var N=VALUE  value for a placeholder the prompt defines itself, e.g. {ticket}
     --focus        focus the started session (default: leave focus unchanged)
-  start prints workspace_id, tab_id, pane_id, agent (name, empty for shell),
-  path, and prompt_deferred as JSON. Errors go to stderr with exit status 2.
+  send             prompt an agent already running in the project (--agent NAME is its
+                   herdr name or pane id); a busy agent gets it once it is idle
+  Placeholders: {branch} {base} {path} {repo} {pr} {pr_title} {pr_body} {commits}
+  {diffstat} {input}. start prints workspace_id, tab_id, pane_id, agent (name, empty
+  for shell), path, and prompt_deferred as JSON; send prints agent and deferred.
+  Errors go to stderr with exit status 2.
 
 Normally Herdr launches this itself:
   herdr plugin action invoke open --plugin hertrees
@@ -130,6 +136,7 @@ struct StartArgs {
     agent: String,
     preset: Option<String>,
     prompt: Option<String>,
+    vars: Vec<(String, String)>,
     focus: bool,
 }
 
@@ -141,6 +148,15 @@ fn parse_start(args: &[String]) -> Result<StartArgs, String> {
         if flag == "--focus" {
             if parsed.focus { return Err("--focus specified more than once".into()); }
             parsed.focus = true;
+            continue;
+        }
+        if flag == "--var" {
+            let value = args.next().ok_or("--var needs NAME=VALUE")?;
+            let (name, value) = value.split_once('=').ok_or("--var needs NAME=VALUE")?;
+            if session::names(&format!("{{{name}}}")).is_empty() {
+                return Err(format!("--var name must be lowercase letters, digits or _: {name}"));
+            }
+            parsed.vars.push((name.to_string(), value.to_string()));
             continue;
         }
         let slot = match flag.as_str() {
@@ -167,9 +183,6 @@ fn parse_start(args: &[String]) -> Result<StartArgs, String> {
     if parsed.base.is_some() && parsed.branch.is_none() {
         return Err("--base requires --branch".into());
     }
-    if parsed.preset.is_some() && parsed.prompt.is_some() {
-        return Err("--preset and --prompt cannot be used together".into());
-    }
     parsed.agent = agent.ok_or("start requires --agent KIND")?;
     if parsed.agent == "shell" && parsed.path.is_some() {
         return Err("--agent shell requires --branch, not --path".into());
@@ -177,16 +190,40 @@ fn parse_start(args: &[String]) -> Result<StartArgs, String> {
     Ok(parsed)
 }
 
+/// The preset's template with `--prompt` added the way the popup's editor adds it.
 fn resolve_prompt(args: &StartArgs, presets: &[Preset]) -> Result<String, String> {
-    if let Some(prompt) = &args.prompt { return Ok(prompt.clone()); }
+    let addition = args.prompt.as_deref().unwrap_or("");
     let name = args.preset.as_deref().unwrap_or(presets::BLANK);
-    if name.eq_ignore_ascii_case(presets::BLANK) { return Ok(String::new()); }
+    if name.eq_ignore_ascii_case(presets::BLANK) { return Ok(addition.to_string()); }
     if name.eq_ignore_ascii_case(presets::CUSTOM) {
-        return Err("the custom preset needs --prompt TEXT instead".into());
+        return match &args.prompt { Some(prompt) => Ok(prompt.clone()), None => Err("the custom preset needs --prompt TEXT".into()) };
     }
-    presets.iter().find(|preset| preset.path.is_some() && preset.name == name)
+    let template = presets.iter().find(|preset| preset.path.is_some() && preset.name == name)
         .and_then(|preset| preset.prompt.clone())
-        .ok_or_else(|| format!("unknown preset: {name}"))
+        .ok_or_else(|| format!("unknown preset: {name}"))?;
+    Ok(session::compose(&template, addition))
+}
+
+/// Fill a resolved prompt: `--var` values, the git/gh placeholders, then the rest.
+fn finish_prompt(template: &str, mut vars: session::PromptVars, given: &[(String, String)], checkout: Option<&str>, pr_url: Option<&str>) -> Result<String, String> {
+    let missing: Vec<String> = session::fields(template).into_iter().filter(|name| !given.iter().any(|(known, _)| known == name)).collect();
+    if !missing.is_empty() {
+        let flags: Vec<String> = missing.iter().map(|name| format!("--var {name}=VALUE")).collect();
+        return Err(format!("the prompt needs {}", flags.join(" ")));
+    }
+    for (name, value) in given {
+        vars.set(name, value.clone());
+    }
+    session::fill_lazy(&mut vars, template, checkout, pr_url);
+    Ok(session::expand_prompt(template, &vars))
+}
+
+/// The main checkout of the repository containing `cwd`, from git alone (no herdr).
+fn repo_root(cwd: &str) -> Option<String> {
+    let argv: Vec<String> = ["git", "-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"].iter().map(|arg| arg.to_string()).collect();
+    let output = crate::proc::run(&argv, 5.0).ok().filter(|output| output.success)?;
+    let common = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    std::path::Path::new(&common).parent().map(|root| root.to_string_lossy().into_owned())
 }
 
 fn matching_worktree<'a>(worktrees: &'a [Worktree], path: &str) -> Result<&'a Worktree, String> {
@@ -201,15 +238,21 @@ fn matching_worktree<'a>(worktrees: &'a [Worktree], path: &str) -> Result<&'a Wo
 
 fn print_presets() -> i32 {
     let dir = presets::dir();
-    let entries = presets::load(dir.as_deref()).into_iter().filter(|preset| preset.path.is_some()).map(|preset| {
+    let root = source_cwd(&[]).as_deref().and_then(repo_root);
+    let entries = presets::load(dir.as_deref(), root.as_deref()).into_iter().filter(|preset| preset.path.is_some()).map(|preset| {
         let mut entry = Map::new();
         entry.insert("name", Value::str(preset.name));
         entry.insert("path", Value::str(preset.path.unwrap().to_string_lossy().into_owned()));
         entry.insert("prompt", Value::str(preset.prompt.unwrap_or_default()));
+        entry.insert("repo", Value::Bool(preset.repo));
+        entry.insert("ask", Value::Bool(preset.ask));
+        entry.insert("agent", preset.agent.map(Value::str).unwrap_or(Value::Null));
+        entry.insert("description", preset.description.map(Value::str).unwrap_or(Value::Null));
         Value::Dict(entry)
     }).collect();
     let mut top = Map::new();
     top.insert("dir", dir.map(|path| Value::str(path.to_string_lossy().into_owned())).unwrap_or(Value::Null));
+    top.insert("repo_dir", root.map(|root| Value::str(presets::repo_dir(&root).to_string_lossy().into_owned())).unwrap_or(Value::Null));
     top.insert("presets", Value::List(entries));
     out(&(pyjson::dumps_indent(&Value::Dict(top), 2) + "\n"));
     0
@@ -217,13 +260,13 @@ fn print_presets() -> i32 {
 
 fn start(args: &[String]) -> Result<(), String> {
     let args = parse_start(args)?;
-    let template = resolve_prompt(&args, &presets::load(presets::dir().as_deref()))?;
     if args.agent != "shell" && session::installed_agents(std::slice::from_ref(&args.agent)).is_empty() {
         return Err(format!("unknown or uninstalled agent kind: {}", args.agent));
     }
     let mut client = HerdrClient::from_env();
     let cwd = args.cwd.clone().or_else(|| source_cwd(&[])).ok_or("no working directory: use --cwd PATH")?;
     let (project, worktrees) = project::load(&mut client, &cwd)?;
+    let template = resolve_prompt(&args, &presets::load(presets::dir().as_deref(), Some(&project.repo_root)))?;
     let new_worktree;
     let wt = if let Some(path) = &args.path {
         matching_worktree(&worktrees, path)?
@@ -231,12 +274,11 @@ fn start(args: &[String]) -> Result<(), String> {
         new_worktree = Worktree { branch: args.branch.clone(), path: "{path}".into(), ..Worktree::default() };
         &new_worktree
     };
-    let info = if template.contains("{pr}") {
-        let gh = crate::pr::github_repo(&project.repo_root);
-        let cached = gh.as_ref().ok().and_then(crate::pr::cached);
-        classify_prs(&project, std::slice::from_ref(wt), &Config::load(), &gh, cached.as_ref()).pop()
-    } else { None };
-    let prompt = session::expand_prompt(&template, &session::prompt_vars(&project, wt, args.base.as_deref(), info.as_ref()));
+    let info = pr_info(&project, wt, &template);
+    let checkout = args.path.as_ref().map(|_| wt.path.as_str());
+    let pr_url = info.as_ref().and_then(|info| info.pr.as_ref()).map(|pr| pr.url.as_str());
+    let vars = session::prompt_vars(&project, wt, args.base.as_deref(), info.as_ref());
+    let prompt = finish_prompt(&template, vars, &args.vars, checkout, pr_url)?;
     let prompt = if prompt.is_empty() { None } else { Some(prompt.as_str()) };
     let started = if args.agent == "shell" {
         session::create_shell(&mut client, &project, args.branch.as_deref().unwrap(), args.base.as_deref())?
@@ -256,6 +298,60 @@ fn start(args: &[String]) -> Result<(), String> {
     result.insert("agent", Value::str(started.agent));
     result.insert("path", Value::str(started.path));
     result.insert("prompt_deferred", Value::Bool(started.prompt_deferred));
+    out(&(pyjson::dumps_indent(&Value::Dict(result), 2) + "\n"));
+    Ok(())
+}
+
+/// The worktree's PR, looked up only when the prompt uses a PR placeholder.
+fn pr_info(project: &Project, wt: &Worktree, template: &str) -> Option<PrInfo> {
+    if !session::names(template).iter().any(|name| name.starts_with("pr")) {
+        return None;
+    }
+    let gh = crate::pr::github_repo(&project.repo_root);
+    let cached = gh.as_ref().ok().and_then(crate::pr::cached);
+    classify_prs(project, std::slice::from_ref(wt), &Config::load(), &gh, cached.as_ref()).pop()
+}
+
+/// `send`: prompt a running agent of the project. Shares start's prompt options.
+fn send(args: &[String]) -> Result<(), String> {
+    let mut rest = Vec::new();
+    let mut agent = None;
+    let mut iter = args.iter();
+    while let Some(flag) = iter.next() {
+        match flag.as_str() {
+            "--agent" if agent.is_some() => return Err("--agent specified more than once".into()),
+            "--agent" => agent = Some(iter.next().filter(|v| !v.is_empty() && !v.starts_with("--")).ok_or("--agent needs a value")?.clone()),
+            "--path" | "--branch" | "--base" | "--focus" => return Err(format!("send does not accept {flag}")),
+            _ => rest.push(flag.clone()),
+        }
+    }
+    let target = agent.ok_or("send requires --agent NAME")?;
+    // Reuse start's parser for --cwd/--preset/--prompt/--var.
+    rest.extend(["--agent".into(), "send".into(), "--branch".into(), "unused".into()]);
+    let parsed = parse_start(&rest)?;
+    if parsed.preset.is_none() && parsed.prompt.is_none() {
+        return Err("send needs --preset NAME or --prompt TEXT".into());
+    }
+    let mut client = HerdrClient::from_env();
+    let cwd = parsed.cwd.clone().or_else(|| source_cwd(&[])).ok_or("no working directory: use --cwd PATH")?;
+    let (project, worktrees) = project::load(&mut client, &cwd)?;
+    let agents = project::agents(&mut client);
+    let by_worktree = project::agents_by_worktree(&worktrees, &agents);
+    let index = by_worktree.iter().position(|here| here.iter().any(|a| a.name.as_deref() == Some(&target) || a.pane_id == target))
+        .ok_or_else(|| format!("no running agent named {target} in this project"))?;
+    let wt = &worktrees[index];
+    let template = resolve_prompt(&parsed, &presets::load(presets::dir().as_deref(), Some(&project.repo_root)))?;
+    if template.trim().is_empty() {
+        return Err("nothing to send: the prompt is empty".into());
+    }
+    let info = pr_info(&project, wt, &template);
+    let pr_url = info.as_ref().and_then(|info| info.pr.as_ref()).map(|pr| pr.url.as_str());
+    let vars = session::prompt_vars(&project, wt, None, info.as_ref());
+    let prompt = finish_prompt(&template, vars, &parsed.vars, Some(&wt.path), pr_url)?;
+    let deferred = session::send_to(&mut client, &target, &prompt)?;
+    let mut result = Map::new();
+    result.insert("agent", Value::str(target));
+    result.insert("deferred", Value::Bool(deferred));
     out(&(pyjson::dumps_indent(&Value::Dict(result), 2) + "\n"));
     Ok(())
 }
@@ -317,7 +413,7 @@ fn list(client: HerdrClient, config: Config, cwd: Option<String>) -> i32 {
 
 pub fn main(args: Vec<String>) -> i32 {
     // Dispatch before global flags so prompt text such as "--help" stays literal.
-    if matches!(args.first().map(String::as_str), Some("start" | "presets")) {
+    if matches!(args.first().map(String::as_str), Some("start" | "send" | "presets")) {
         if args.len() == 2 && matches!(args[1].as_str(), "--help" | "-h") {
             out(USAGE);
             return 0;
@@ -325,6 +421,7 @@ pub fn main(args: Vec<String>) -> i32 {
         return match args[0].as_str() {
             "presets" if args.len() == 1 => print_presets(),
             "presets" => fail("presets does not accept options"),
+            "send" => match send(&args[1..]) { Ok(()) => 0, Err(error) => fail(&error) },
             _ => match start(&args[1..]) { Ok(()) => 0, Err(error) => fail(&error) },
         };
     }
@@ -452,7 +549,8 @@ mod tests {
             (vec!["--branch", "new"], "requires --agent"),
             (vec!["--branch", "new", "--agent"], "--agent needs a value"),
             (vec!["--branch", "--agent", "claude"], "--branch needs a value"),
-            (vec!["--branch", "new", "--agent", "claude", "--preset", "plan", "--prompt", "hi"], "cannot be used together"),
+            (vec!["--branch", "new", "--agent", "claude", "--var", "ticket"], "NAME=VALUE"),
+            (vec!["--branch", "new", "--agent", "claude", "--var", "Bad=x"], "lowercase"),
             (vec!["--path", "/repo", "--agent", "claude", "--base", "main"], "--base requires --branch"),
             (vec!["--path", "/repo", "--agent", "shell"], "shell requires --branch"),
             (vec!["--branch", "new", "--agent", "claude", "--agent", "codex"], "more than once"),
@@ -478,7 +576,10 @@ mod tests {
 
     #[test]
     fn preset_resolution_distinguishes_builtins_files_and_literal_prompts() {
-        let presets = vec![Preset { name: "plan".into(), path: Some("/presets/plan.md".into()), prompt: Some("plan {branch}".into()) }];
+        let presets = vec![
+            Preset { name: "plan".into(), path: Some("/presets/plan.md".into()), prompt: Some("plan {branch}".into()), ..Preset::default() },
+            Preset { name: "wrap".into(), path: Some("/presets/wrap.md".into()), prompt: Some("Task: {input}\nRules.".into()), ..Preset::default() },
+        ];
         let mut input = StartArgs::default();
         assert_eq!(resolve_prompt(&input, &presets).unwrap(), "");
         input.preset = Some("BLANK".into());
@@ -494,6 +595,22 @@ mod tests {
         assert_eq!(resolve_prompt(&input, &presets).unwrap(), "");
         input.prompt = Some("literal {branch}".into());
         assert_eq!(resolve_prompt(&input, &presets).unwrap(), "literal {branch}");
+        // A preset and a prompt together: below the preset, or at its {input}.
+        input.preset = Some("plan".into());
+        input.prompt = Some("then fix it".into());
+        assert_eq!(resolve_prompt(&input, &presets).unwrap(), "plan {branch}\n\nthen fix it");
+        input.preset = Some("wrap".into());
+        assert_eq!(resolve_prompt(&input, &presets).unwrap(), "Task: then fix it\nRules.");
+    }
+
+    #[test]
+    fn vars_fill_fields_and_missing_ones_are_named() {
+        let parsed = parse_start(&args(&["--branch", "new", "--agent", "claude", "--var", "ticket=ABC-1", "--var", "area=a=b"])).unwrap();
+        assert_eq!(parsed.vars, [("ticket".to_string(), "ABC-1".to_string()), ("area".to_string(), "a=b".to_string())]);
+        let mut vars = session::PromptVars::default();
+        vars.set("branch", "topic");
+        assert_eq!(finish_prompt("{ticket} on {branch} in {area}", vars.clone(), &parsed.vars, None, None).unwrap(), "ABC-1 on topic in a=b");
+        assert_eq!(finish_prompt("{ticket} {owner} {team}", vars, &parsed.vars, None, None).unwrap_err(), "the prompt needs --var owner=VALUE --var team=VALUE");
     }
 
     #[test]

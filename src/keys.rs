@@ -140,6 +140,9 @@ impl KeyDecoder {
             if second == 0x1B {
                 return (1, Some(Event::Key("esc".into())));
             }
+            if second == 0x0D {
+                return (2, Some(Event::Key("alt+enter".into())));
+            }
             let (text, size) = decode_text(&buffer[1..]);
             if size == 0 {
                 return (0, None);
@@ -367,6 +370,11 @@ mod tests {
         assert_eq!(decoder.feed(b"\x1b"), vec![]);
         assert!(decoder.pending_escape());
         assert_eq!(decoder.flush(), vec![key("esc")]);
+    }
+
+    #[test]
+    fn escape_then_carriage_return_is_alt_enter() {
+        assert_eq!(KeyDecoder::new().feed(b"\x1b\r"), vec![key("alt+enter")]);
     }
 
     #[test]

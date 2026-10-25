@@ -17,7 +17,7 @@ use crate::pystr;
 use crate::render::{self, compute_layout, scrollbar_column, Item, Layout, Meta, Row, Segment};
 use crate::session::{self, PromptVars, Started};
 use crate::term::Terminal;
-use crate::textutil::{display_width, pad, sanitize};
+use crate::textutil::{display_width, pad, sanitize, truncate};
 use crate::theme::Theme;
 use crate::wordmark::{self, Style};
 use std::collections::BTreeMap;
@@ -196,21 +196,134 @@ impl LineEdit {
     }
 }
 
+/// The prompt editor: like `LineEdit`, but pasted line breaks stay and ^j or
+/// alt+⏎ starts a new line. `↑`/`↓` move between lines and report false at the
+/// first/last line, where the caller recalls earlier prompts instead.
+#[derive(Clone, Debug, Default)]
+pub struct TextEdit {
+    pub text: String,
+    pub cursor: usize,
+}
+
+impl TextEdit {
+    fn chars(&self) -> Vec<char> {
+        self.text.chars().collect()
+    }
+
+    fn set(&mut self, chars: &[char], cursor: usize) {
+        self.text = chars.iter().collect();
+        self.cursor = cursor.min(chars.len());
+    }
+
+    /// Start of the cursor's line and its column, in chars.
+    fn line_start(chars: &[char], cursor: usize) -> usize {
+        chars[..cursor].iter().rposition(|&c| c == '\n').map(|i| i + 1).unwrap_or(0)
+    }
+
+    fn line_end(chars: &[char], cursor: usize) -> usize {
+        chars[cursor..].iter().position(|&c| c == '\n').map(|i| cursor + i).unwrap_or(chars.len())
+    }
+
+    fn insert(&mut self, text: &str, pasted: bool) -> bool {
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
+        let lines: Vec<String> = text.split('\n').map(|line| sanitize(line, " ")).collect();
+        let text = if pasted { lines.join("\n") } else { lines.join(" ") };
+        if text.is_empty() {
+            return false;
+        }
+        let mut chars = self.chars();
+        let added: Vec<char> = text.chars().collect();
+        let cursor = self.cursor + added.len();
+        chars.splice(self.cursor..self.cursor, added);
+        self.set(&chars, cursor);
+        true
+    }
+
+    fn key(&mut self, name: &str) -> bool {
+        let mut chars = self.chars();
+        let cursor = self.cursor.min(chars.len());
+        let start = Self::line_start(&chars, cursor);
+        match name {
+            "ctrl+j" | "alt+enter" | "shift+enter" => {
+                chars.insert(cursor, '\n');
+                self.set(&chars, cursor + 1);
+            }
+            "home" | "ctrl+a" => self.cursor = start,
+            "end" | "ctrl+e" => self.cursor = Self::line_end(&chars, cursor),
+            "ctrl+home" => self.cursor = 0,
+            "ctrl+end" => self.cursor = chars.len(),
+            "left" => self.cursor = cursor.saturating_sub(1),
+            "right" => self.cursor = (cursor + 1).min(chars.len()),
+            "up" => {
+                if start == 0 {
+                    return false;
+                }
+                let above = Self::line_start(&chars, start - 1);
+                self.cursor = (above + cursor - start).min(start - 1);
+            }
+            "down" => {
+                let end = Self::line_end(&chars, cursor);
+                if end == chars.len() {
+                    return false;
+                }
+                self.cursor = (end + 1 + cursor - start).min(Self::line_end(&chars, end + 1));
+            }
+            "backspace" if cursor > 0 => {
+                chars.remove(cursor - 1);
+                self.set(&chars, cursor - 1);
+            }
+            "ctrl+d" | "delete" if cursor < chars.len() => {
+                chars.remove(cursor);
+                self.set(&chars, cursor);
+            }
+            "backspace" | "ctrl+d" | "delete" => {}
+            "ctrl+u" => self.set(&[], 0),
+            "ctrl+w" => {
+                let mut from = cursor;
+                while from > start && chars[from - 1] == ' ' {
+                    from -= 1;
+                }
+                while from > start && chars[from - 1] != ' ' {
+                    from -= 1;
+                }
+                chars.drain(from..cursor);
+                self.set(&chars, from);
+            }
+            _ => return false,
+        }
+        true
+    }
+}
+
 /// Where a new session goes.
 #[derive(Clone, Debug)]
 pub enum Target {
     Existing(usize),
     New(String),
+    /// Prompt an agent already running in this worktree (^s); `kind` is its herdr target.
+    Running(usize),
 }
 
 enum Mode {
     List,
     Branch(LineEdit),
     Agent { target: Target, edit: LineEdit, kinds: Vec<String>, rows: Vec<usize>, selected: usize, preset: usize },
-    Custom { target: Target, kind: String, edit: LineEdit },
+    /// The prompt editor: the user's text under `preset` (or alone for custom).
+    Custom { target: Target, kind: String, edit: TextEdit, preset: usize, recall: Option<(usize, String)>, completion: Option<Completion> },
+    /// Values for the prompt's own placeholders (`{ticket}`), one at a time.
+    Fields { target: Target, kind: String, prompt: String, addition: String, names: Vec<String>, values: Vec<String>, edit: LineEdit, back: Box<Mode> },
     Presets { previous: Box<Mode>, edit: LineEdit, rows: Vec<Row>, selected: usize, confirm: Option<String> },
     PresetName { previous: Box<Mode>, action: PresetAction, edit: LineEdit },
     Busy(String),
+}
+
+/// A placeholder being completed with ⇥: where its `{` is, what was typed
+/// after it, and which candidate is shown.
+#[derive(Clone, Debug)]
+struct Completion {
+    brace: usize,
+    prefix: String,
+    choice: usize,
 }
 
 enum PresetAction {
@@ -231,6 +344,8 @@ enum Msg {
     Prs(Result<PrSnapshot, String>),
     Progress(String),
     Done(Result<Started, String>),
+    /// A prompt sent to a running agent: its name and whether delivery waits for it.
+    Sent(Result<(String, bool), String>),
 }
 
 /// Everything one load of a project produces; built off the UI thread.
@@ -320,6 +435,8 @@ pub struct Picker {
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
     pending_facts: usize,
+    /// Earlier prompt-editor texts, oldest first; read when the editor opens.
+    history: Vec<String>,
 }
 
 impl Picker {
@@ -328,7 +445,7 @@ impl Picker {
         let preview_enabled = config.preview_starts_on();
         let scope = config.scope;
         let presets_dir = presets::dir();
-        let presets = presets::load(presets_dir.as_deref());
+        let presets = presets::load(presets_dir.as_deref(), None);
         let mut picker = Picker {
             client,
             config,
@@ -369,8 +486,10 @@ impl Picker {
             rx,
             pending_facts: 0,
             size: (0, 0),
+            history: Vec::new(),
         };
         picker.take(loaded);
+        picker.presets = picker.load_presets();
         picker
     }
 
@@ -658,6 +777,15 @@ impl Picker {
                     self.dirty = true;
                 }
                 Msg::Done(Ok(started)) => return Some(Outcome::Started(started)),
+                Msg::Sent(result) => {
+                    self.mode = Mode::List;
+                    match result {
+                        Ok((agent, false)) => self.flash(format!("sent to {}", agent), "accent"),
+                        Ok((agent, true)) => self.flash(format!("queued for {}: sent once it is idle", agent), "accent"),
+                        Err(error) => self.flash(error, "blocked"),
+                    }
+                    self.refresh_agents();
+                }
                 Msg::Done(Err(error)) => {
                     self.mode = Mode::List;
                     // A failure after `worktree.create` (agent start, prompt) still
@@ -770,6 +898,15 @@ impl Picker {
             "ctrl+b" => self.open_selected_pr(),
             "ctrl+r" => self.reload(),
             "ctrl+l" => self.cycle_wordmark(),
+            "ctrl+s" => {
+                if let Some(index) = self.selected_index() {
+                    if self.agents.get(index).is_some_and(|agents| !agents.is_empty()) {
+                        self.enter_agent_mode(Target::Running(index));
+                    } else {
+                        self.flash("no agent is running in this worktree: ^t starts one", "muted");
+                    }
+                }
+            }
             "ctrl+t" => {
                 if let Some(index) = self.selected_index() {
                     let wt = &self.worktrees[index];
@@ -840,6 +977,13 @@ impl Picker {
     }
 
     fn enter_agent_mode(&mut self, target: Target) {
+        if let Target::Running(index) = target {
+            let kinds: Vec<String> = self.agents[index].iter().map(agent_target).collect();
+            let rows = (0..kinds.len()).collect();
+            self.mode = Mode::Agent { target, edit: LineEdit::default(), kinds, rows, selected: 0, preset: 0 };
+            self.dirty = true;
+            return;
+        }
         let mut kinds = session::installed_agents(&self.config.agents);
         if let Some(default) = &self.config.default_agent {
             if let Some(pos) = kinds.iter().position(|k| k == default) {
@@ -860,8 +1004,24 @@ impl Picker {
     }
 
     fn preset_item(preset: &Preset) -> Item {
-        let detail = preset.prompt.as_deref().unwrap_or("").lines().find(|line| !line.trim().is_empty()).unwrap_or("").to_string();
-        Item::new(preset.name.clone(), detail.clone(), String::new(), None, Vec::new(), vec![detail])
+        let first_line = || preset.prompt.as_deref().unwrap_or("").lines().find(|line| !line.trim().is_empty()).unwrap_or("").to_string();
+        let detail = preset.description.clone().unwrap_or_else(first_line);
+        let mut meta = Vec::new();
+        if preset.ask {
+            meta.push(Meta::new("muted", "asks"));
+        }
+        if let Some(agent) = &preset.agent {
+            meta.push(Meta::new("muted", agent.clone()));
+        }
+        if preset.repo {
+            meta.push(Meta::new("accent", "repo"));
+        }
+        Item::new(preset.name.clone(), detail.clone(), String::new(), None, meta, vec![detail])
+    }
+
+    /// The user's presets plus the open repository's `.hertrees/presets/`.
+    fn load_presets(&self) -> Vec<Preset> {
+        presets::load(self.presets_dir.as_deref(), self.project.as_ref().map(|project| project.repo_root.as_str()))
     }
 
     /// Keep the agent's chosen template by name while nested in a preset editor.
@@ -875,7 +1035,7 @@ impl Picker {
                 _ => {}
             }
         }
-        let loaded = presets::load(self.presets_dir.as_deref());
+        let loaded = self.load_presets();
         remap(&mut self.mode, &self.presets, &loaded);
         self.presets = loaded;
         self.presets_refilter();
@@ -959,6 +1119,9 @@ impl Picker {
             "esc" | "ctrl+g" => self.restore_preset_previous(),
             "enter" => return Some(Outcome::Edit { path: chosen?.path?, created: false }),
             "ctrl+x" => self.enter_preset_name(PresetAction::New),
+            "ctrl+r" | "delete" | "ctrl+d" if chosen.as_ref().is_some_and(|chosen| chosen.repo) => {
+                self.flash("a repo preset: rename or delete it in the repository's .hertrees/presets/", "muted");
+            }
             "ctrl+r" => {
                 if let Some(chosen) = chosen {
                     self.enter_preset_name(PresetAction::Rename(chosen.name));
@@ -1114,23 +1277,43 @@ impl Picker {
                         let len = char_len(branch);
                         Mode::Branch(LineEdit { text: branch.clone(), cursor: len })
                     }
-                    Target::Existing(_) => Mode::List,
+                    Target::Existing(_) | Target::Running(_) => Mode::List,
                 };
             }
             "ctrl+e" => self.enter_presets(),
-            "tab" => *preset = (*preset + 1) % self.presets.len(),
-            "shift+tab" => *preset = (*preset + self.presets.len() - 1) % self.presets.len(),
+            "tab" | "shift+tab" => {
+                let count = self.presets.len();
+                *preset = if name == "tab" { (*preset + 1) % count } else { (*preset + count - 1) % count };
+                // A preset's `agent:` setting picks that agent while it is chosen.
+                if let Some(wanted) = self.presets[*preset].agent.as_deref() {
+                    if !matches!(target, Target::Running(_)) {
+                        if let Some(position) = rows.iter().position(|&row| kinds[row] == wanted) {
+                            *selected = position;
+                        }
+                    }
+                }
+            }
             "up" | "ctrl+p" | "ctrl+k" => self.move_by(-1, true),
             "down" | "ctrl+n" | "ctrl+j" => self.move_by(1, true),
-            "enter" => {
+            "enter" | "ctrl+o" => {
                 let Some(&row) = rows.get(*selected) else { return None };
                 let kind = kinds[row].clone();
                 let target = target.clone();
-                if kind != SHELL && self.presets[*preset].prompt.is_none() {
-                    self.mode = Mode::Custom { target, kind, edit: LineEdit::default() };
+                let chosen = *preset;
+                let template = self.presets[chosen].prompt.clone();
+                if kind == SHELL {
+                    self.launch(target, kind, String::new(), String::new(), Vec::new());
+                    return None;
+                }
+                // ^o always adds text under the preset; ⏎ does when the preset
+                // asks for it (custom, `ask: true`, or an `{input}` slot).
+                let opens = name == "ctrl+o"
+                    || self.presets[chosen].ask
+                    || template.as_deref().map(|t| t.contains("{input}")).unwrap_or(true);
+                if opens {
+                    self.open_editor(target, kind, chosen);
                 } else {
-                    let prompt = self.presets[*preset].prompt.clone().unwrap_or_default();
-                    self.launch(target, kind, prompt);
+                    self.submit(target, kind, template.unwrap_or_default(), String::new());
                 }
             }
             other => {
@@ -1144,32 +1327,117 @@ impl Picker {
         None
     }
 
+    fn open_editor(&mut self, target: Target, kind: String, preset: usize) {
+        self.history = presets::history();
+        self.mode = Mode::Custom { target, kind, edit: TextEdit::default(), preset, recall: None, completion: None };
+        self.status = None;
+        self.dirty = true;
+    }
+
+    /// The preset text the editor shows above the user's own.
+    fn editor_template(&self, preset: usize) -> String {
+        self.presets.get(preset).and_then(|preset| preset.prompt.clone()).unwrap_or_default()
+    }
+
+    /// Back from the editor to the agent picker, on the same agent and preset.
+    fn leave_editor(&mut self) {
+        let Mode::Custom { target, kind, preset: chosen, .. } = std::mem::replace(&mut self.mode, Mode::List) else { return };
+        self.enter_agent_mode(target);
+        if let Mode::Agent { kinds, rows, selected, preset, .. } = &mut self.mode {
+            *selected = rows.iter().position(|&row| kinds[row] == kind).unwrap_or(0);
+            *preset = chosen.min(self.presets.len() - 1);
+        }
+    }
+
     fn handle_custom_key(&mut self, name: &str) -> Option<Outcome> {
-        let Mode::Custom { target, kind, edit } = &mut self.mode else { return None };
+        let template = match &self.mode {
+            Mode::Custom { preset, .. } => self.editor_template(*preset),
+            _ => return None,
+        };
+        let Mode::Custom { target, kind, edit, recall, completion, .. } = &mut self.mode else { return None };
+        if !matches!(name, "tab" | "shift+tab") {
+            *completion = None;
+        }
         match name {
             "ctrl+c" | "ctrl+q" => return Some(Outcome::Cancel),
-            "esc" | "ctrl+g" => {
-                let target = target.clone();
-                self.enter_agent_mode(target);
-                if let Mode::Agent { preset, .. } = &mut self.mode {
-                    *preset = self.presets.len() - 1;
-                }
-            }
+            "esc" | "ctrl+g" => self.leave_editor(),
             "ctrl+s" => {
-                let prompt = edit.text.trim().to_string();
-                if prompt.is_empty() {
+                let prompt = session::compose(&template, &edit.text);
+                if prompt.trim().is_empty() {
                     self.flash("type a prompt before saving a preset", "blocked");
                 } else {
                     self.enter_preset_name(PresetAction::Save(prompt));
                 }
             }
             "enter" => {
-                let prompt = pystr::strip(&edit.text).to_string();
-                if prompt.is_empty() {
+                let addition = pystr::strip(&edit.text).to_string();
+                if template.is_empty() && addition.is_empty() {
                     return None;
                 }
                 let (target, kind) = (target.clone(), kind.clone());
-                self.launch(target, kind, prompt);
+                let prompt = session::compose(&template, &addition);
+                self.submit(target, kind, prompt, addition);
+            }
+            "tab" | "shift+tab" => {
+                let extra = session::fields(&template);
+                let step = if name == "tab" { 1 } else { -1 };
+                match complete(edit, completion, step, &extra) {
+                    Ok(name) => {
+                        let about = session::PLACEHOLDERS.iter().find(|(known, _)| *known == name)
+                            .map(|(_, about)| *about).unwrap_or("you type its value before sending");
+                        self.flash(format!("{{{}}} — {}", name, about), "accent");
+                    }
+                    Err(error) => self.flash(error, "muted"),
+                }
+            }
+            "up" | "down" => {
+                if !edit.key(name) {
+                    recall_history(&self.history, edit, recall, name == "up");
+                }
+            }
+            other => {
+                edit.key(other);
+            }
+        }
+        self.dirty = true;
+        None
+    }
+
+    /// Ask for the prompt's own placeholders first, if it has any, then start.
+    fn submit(&mut self, target: Target, kind: String, prompt: String, addition: String) {
+        let names = session::fields(&prompt);
+        if names.is_empty() {
+            self.launch(target, kind, prompt, addition, Vec::new());
+            return;
+        }
+        let back = Box::new(std::mem::replace(&mut self.mode, Mode::List));
+        self.mode = Mode::Fields { target, kind, prompt, addition, names, values: Vec::new(), edit: LineEdit::default(), back };
+        self.status = None;
+        self.dirty = true;
+    }
+
+    fn handle_fields_key(&mut self, name: &str) -> Option<Outcome> {
+        let Mode::Fields { names, values, edit, .. } = &mut self.mode else { return None };
+        match name {
+            "ctrl+c" | "ctrl+q" => return Some(Outcome::Cancel),
+            "esc" | "ctrl+g" => {
+                if let Mode::Fields { back, .. } = std::mem::replace(&mut self.mode, Mode::List) {
+                    self.mode = *back;
+                }
+            }
+            "enter" => {
+                let value = pystr::strip(&edit.text).to_string();
+                if value.is_empty() {
+                    let field = names[values.len()].clone();
+                    self.flash(format!("type a value for {{{}}}", field), "blocked");
+                    return None;
+                }
+                values.push(value);
+                *edit = LineEdit::default();
+                if values.len() == names.len() {
+                    let Mode::Fields { target, kind, prompt, addition, names, values, .. } = std::mem::replace(&mut self.mode, Mode::List) else { unreachable!() };
+                    self.launch(target, kind, prompt, addition, names.into_iter().zip(values).collect());
+                }
             }
             other => {
                 edit.key(other);
@@ -1182,7 +1450,9 @@ impl Picker {
     fn prompt_vars(&self, target: &Target) -> PromptVars {
         let project = self.project.clone().unwrap_or_default();
         match target {
-            Target::Existing(index) => session::prompt_vars(&project, &self.worktrees[*index], None, Some(&self.prs[*index])),
+            Target::Existing(index) | Target::Running(index) => {
+                session::prompt_vars(&project, &self.worktrees[*index], None, Some(&self.prs[*index]))
+            }
             Target::New(branch) => session::prompt_vars(
                 &project,
                 &Worktree { branch: Some(branch.clone()), path: "{path}".into(), ..Worktree::default() },
@@ -1192,21 +1462,42 @@ impl Picker {
         }
     }
 
-    /// Start the session on a thread; the UI shows its progress meanwhile.
-    fn launch(&mut self, target: Target, kind: String, template: String) {
+    /// Start the session (or prompt the running agent) on a thread; the UI
+    /// shows its progress meanwhile. `fields` are the values the user typed.
+    fn launch(&mut self, target: Target, kind: String, template: String, addition: String, fields: Vec<(String, String)>) {
         let Some(project) = self.project.clone() else { return };
-        let prompt = if template.is_empty() { String::new() } else { session::expand_prompt(&template, &self.prompt_vars(&target)) };
+        presets::remember(&addition);
+        let mut vars = self.prompt_vars(&target);
+        for (name, value) in &fields {
+            vars.set(name, value.clone());
+        }
+        let (checkout, pr_url) = match &target {
+            Target::Existing(index) | Target::Running(index) => {
+                (Some(self.worktrees[*index].path.clone()), self.prs[*index].pr.as_ref().map(|pr| pr.url.clone()))
+            }
+            Target::New(_) => (None, None),
+        };
         let base = self.base_branch();
         let worktree = match &target {
-            Target::Existing(index) => Some(self.worktrees[*index].clone()),
+            Target::Existing(index) | Target::Running(index) => Some(self.worktrees[*index].clone()),
             Target::New(_) => None,
         };
         let taken = self.agent_names.clone();
         let mut client = self.client.clone();
         let tx = self.tx.clone();
-        self.mode = Mode::Busy(format!("starting {}…", kind));
+        self.mode = Mode::Busy(match target {
+            Target::Running(_) => format!("sending to {}…", kind),
+            _ => format!("starting {}…", kind),
+        });
         self.dirty = true;
         std::thread::spawn(move || {
+            session::fill_lazy(&mut vars, &template, checkout.as_deref(), pr_url.as_deref());
+            let prompt = if template.is_empty() { String::new() } else { session::expand_prompt(&template, &vars) };
+            if let Target::Running(_) = target {
+                let result = session::send_to(&mut client, &kind, &prompt).map(|deferred| (kind, deferred));
+                let _ = tx.send(Msg::Sent(result));
+                return;
+            }
             let progress_tx = tx.clone();
             let mut progress = move |text: &str| {
                 let _ = progress_tx.send(Msg::Progress(text.to_string()));
@@ -1220,7 +1511,7 @@ impl Picker {
                 (Target::Existing(_), Some(wt)) => {
                     session::start_existing(&mut client, &project, &wt, &kind, prompt, &taken, &mut progress)
                 }
-                (Target::Existing(_), None) => Err("worktree disappeared".into()),
+                (_, None) | (Target::Running(_), _) => Err("worktree disappeared".into()),
             };
             let _ = tx.send(Msg::Done(result));
         });
@@ -1249,7 +1540,11 @@ impl Picker {
                     self.agent_refilter();
                 }
             }
-            Mode::Custom { edit, .. } => {
+            Mode::Custom { edit, completion, .. } => {
+                *completion = None;
+                edit.insert(text, pasted);
+            }
+            Mode::Fields { edit, .. } => {
                 edit.insert(text, pasted);
             }
             Mode::Presets { edit, confirm, .. } => {
@@ -1338,6 +1633,7 @@ impl Picker {
                     Mode::Branch(_) => self.handle_branch_key(name),
                     Mode::Agent { .. } => self.handle_agent_key(name),
                     Mode::Custom { .. } => self.handle_custom_key(name),
+                    Mode::Fields { .. } => self.handle_fields_key(name),
                     Mode::Presets { .. } => self.handle_presets_key(name),
                     Mode::PresetName { .. } => self.handle_preset_name_key(name),
                     Mode::Busy(_) => None,
@@ -1442,13 +1738,24 @@ impl Picker {
                 render::render_input(&self.theme, &edit.text, edit.cursor, width, &placeholder, "⏎ next · esc back", "new worktree ❯")
             }
             Mode::Agent { target, edit, preset, .. } => {
-                let placeholder = format!("start an agent in {}…    ⇥ preset", self.target_name(target));
-                let chip = format!("preset: {}", self.presets[*preset].name);
-                render::render_input(&self.theme, &edit.text, edit.cursor, width, &placeholder, &chip, "agent ❯")
+                let (verb, prompt) = if matches!(target, Target::Running(_)) { ("send to an agent", "send ❯") } else { ("start an agent", "agent ❯") };
+                let placeholder = format!("{} in {}…    ⇥ preset · ^o add text", verb, self.target_name(target));
+                let chosen = &self.presets[*preset];
+                let chip = format!("preset: {}{}", chosen.name, if chosen.repo { " (repo)" } else { "" });
+                render::render_input(&self.theme, &edit.text, edit.cursor, width, &placeholder, &chip, prompt)
             }
-            Mode::Custom { target, kind, edit } => {
-                let placeholder = format!("what should {} do in {}?", kind, self.target_name(target));
-                render::render_input(&self.theme, &edit.text, edit.cursor, width, &placeholder, "⏎ start · esc back", "prompt ❯")
+            Mode::Custom { target, kind, .. } => {
+                let title = match target {
+                    Target::Running(_) => format!("send ❯ prompt for {}", kind),
+                    _ => format!("prompt ❯ {} in {}", kind, self.target_name(target)),
+                };
+                render::render_status(&self.theme, width, "accent", &title, "⏎ send · ^j new line · esc back")
+            }
+            Mode::Fields { names, values, edit, .. } => {
+                let name = &names[values.len().min(names.len() - 1)];
+                let placeholder = format!("value for {{{}}}", name);
+                let chip = format!("{}/{} · ⏎ next · esc back", values.len() + 1, names.len());
+                render::render_input(&self.theme, &edit.text, edit.cursor, width, &placeholder, &chip, &format!("{} ❯", name))
             }
             Mode::Presets { edit, .. } => {
                 render::render_input(&self.theme, &edit.text, edit.cursor, width, "search presets…", "", "presets ❯")
@@ -1466,7 +1773,7 @@ impl Picker {
 
     fn target_name(&self, target: &Target) -> String {
         match target {
-            Target::Existing(index) => self.worktrees[*index].title(),
+            Target::Existing(index) | Target::Running(index) => self.worktrees[*index].title(),
             Target::New(branch) => branch.clone(),
         }
     }
@@ -1543,12 +1850,14 @@ impl Picker {
                     row, layout.list_width, position == selected).text).unwrap_or_default()
             }).collect();
         }
+        if let Mode::Custom { .. } | Mode::Fields { .. } = &self.mode {
+            return self.editor_rows(layout);
+        }
         let agent_rows: Option<(Vec<Item>, usize)> = match &self.mode {
-            Mode::Agent { kinds, rows, selected, .. } => {
-                let items = rows.iter().map(|&i| self.agent_item(&kinds[i])).collect();
+            Mode::Agent { target, kinds, rows, selected, .. } => {
+                let items = rows.iter().map(|&i| self.agent_item(target, &kinds[i])).collect();
                 Some((items, *selected))
             }
-            Mode::Custom { kind, .. } => Some((vec![self.agent_item(kind)], 0)),
             _ => None,
         };
         if let Some((items, selected)) = agent_rows {
@@ -1592,7 +1901,13 @@ impl Picker {
         out
     }
 
-    fn agent_item(&self, kind: &str) -> Item {
+    fn agent_item(&self, target: &Target, kind: &str) -> Item {
+        if let Target::Running(index) = target {
+            if let Some(agent) = self.agents[*index].iter().find(|agent| agent_target(agent) == kind) {
+                let meta = vec![Meta::new(render::status_role(&agent.status), render::status_word(&agent.status))];
+                return Item::new(kind.to_string(), agent.kind.clone(), agent.status.clone(), Some(agent.kind.clone()), meta, Vec::new());
+            }
+        }
         let mut meta = Vec::new();
         if self.config.default_agent.as_deref() == Some(kind) {
             meta.push(Meta::new("accent", "default"));
@@ -1615,8 +1930,8 @@ impl Picker {
                 render::render_preview(&self.theme, &preset.name, "", &path, &body, width, height)
             }
             Mode::PresetName { previous, action: PresetAction::Save(prompt), .. } => {
-                if let Mode::Custom { target, kind, .. } = previous.as_ref() {
-                    return self.session_preview(target, kind, "custom", Some(prompt.clone()), width, height);
+                if let Mode::Custom { target, kind, preset, .. } = previous.as_ref() {
+                    return self.session_preview(target, kind, &self.presets[*preset].name, Some(prompt.clone()), width, height);
                 }
                 Vec::new()
             }
@@ -1626,8 +1941,20 @@ impl Picker {
                 let template = self.presets[*preset].prompt.clone();
                 self.session_preview(target, kind, &self.presets[*preset].name, template, width, height)
             }
-            Mode::Custom { target, kind, edit } => {
-                self.session_preview(target, kind, "custom", Some(edit.text.clone()), width, height)
+            Mode::Custom { target, kind, edit, preset, .. } => {
+                let prompt = session::compose(&self.editor_template(*preset), &edit.text);
+                self.session_preview(target, kind, &self.presets[*preset].name, Some(prompt), width, height)
+            }
+            Mode::Fields { target, kind, prompt, names, values, back, .. } => {
+                let mut typed = PromptVars::default();
+                for (name, value) in names.iter().zip(values) {
+                    typed.set(name, value.clone());
+                }
+                let preset = match back.as_ref() {
+                    Mode::Custom { preset, .. } | Mode::Agent { preset, .. } => self.presets[*preset].name.as_str(),
+                    _ => "",
+                };
+                self.session_preview(target, kind, preset, Some(session::expand_prompt(prompt, &typed)), width, height)
             }
             Mode::Branch(edit) => {
                 let base = self.base_branch().unwrap_or_else(|| "HEAD".into());
@@ -1661,6 +1988,10 @@ impl Picker {
                     vec![vec![Segment::new("muted", format!("git worktree add -b {} … {}", branch, base))]],
                 )
             }
+            Target::Running(index) => {
+                let how = if kind.is_empty() { "types into a running agent".into() } else { format!("types into {}; queued while it is busy", kind) };
+                (self.worktrees[*index].path.clone(), vec![vec![Segment::new("muted", how)]])
+            }
         };
         body.push(Vec::new());
         if kind == SHELL {
@@ -1671,15 +2002,121 @@ impl Picker {
                 Some(t) if !t.is_empty() => {
                     session::expand_prompt(&t, &self.prompt_vars(target)).replace("{path}", "‹new worktree path›")
                 }
-                Some(_) if preset == "custom" => "type the first prompt above".into(),
+                Some(_) if preset == "custom" => "type the prompt in the editor".into(),
                 _ => "no first prompt: the agent starts idle".into(),
             };
             for line in wrap_template(&text, width) {
                 body.push(vec![Segment::new("text", line)]);
             }
         }
-        let title = if kind.is_empty() { "new session".to_string() } else { format!("{} session", kind) };
+        let title = match (target, kind.is_empty()) {
+            (Target::Running(_), _) => "prompt".to_string(),
+            (_, true) => "new session".to_string(),
+            (_, false) => format!("{} session", kind),
+        };
         render::render_preview(&self.theme, &title, &self.target_name(target), &subtitle, &body, width, height)
+    }
+
+    /// The editor's body: the agent, the preset's text dimmed (shortened when
+    /// room is short), then the user's own text with its cursor. Placeholder
+    /// fields list the values typed so far instead.
+    fn editor_rows(&self, layout: &Layout) -> Vec<String> {
+        let width = layout.list_width;
+        let height = layout.list_height.max(0) as usize;
+        let paint = |segments: &[Segment]| render::segments_to_text(&self.theme, segments, "");
+        let (target, kind) = match &self.mode {
+            Mode::Custom { target, kind, .. } | Mode::Fields { target, kind, .. } => (target, kind),
+            _ => return Vec::new(),
+        };
+        let blank = Row { item: 0, positions: Vec::new(), field_positions: BTreeMap::new() };
+        let mut top = vec![render::render_row(&self.theme, &self.agent_item(target, kind), &blank, width, true).text, String::new()];
+        let mut bottom: Vec<String> = Vec::new();
+        let mut header: Vec<String> = Vec::new();
+        match &self.mode {
+            Mode::Fields { names, values, .. } => {
+                for (index, name) in names.iter().enumerate() {
+                    let (role, value) = match values.get(index) {
+                        Some(value) => ("text", value.clone()),
+                        None if index == values.len() => ("accent", "typing above…".into()),
+                        None => ("unknown", "next".into()),
+                    };
+                    let line = [Segment::new("muted", format!("{{{}}}  ", name)), Segment::new(role, value)];
+                    header.push(truncate(&paint(&line), width));
+                }
+            }
+            Mode::Custom { edit, preset, .. } => {
+                let template = self.editor_template(*preset);
+                if !template.is_empty() {
+                    let chosen = &self.presets[*preset];
+                    let mut title = vec![Segment::new("muted", "preset "), Segment::bold("accent", chosen.name.clone(), true)];
+                    if chosen.repo {
+                        title.push(Segment::new("muted", " · repo"));
+                    }
+                    header.push(paint(&title));
+                    for line in wrap_template(&template, width - 2) {
+                        header.push(paint(&[Segment::new("unknown", format!("│ {}", line))]));
+                    }
+                    header.push(String::new());
+                    let place = if template.contains("{input}") { "your text goes at {input}" } else { "your text goes below the preset" };
+                    header.push(paint(&[Segment::new("muted", place)]));
+                }
+                bottom = self.editor_text(edit, width);
+                if height > top.len() + bottom.len() + 2 {
+                    bottom.push(String::new());
+                    bottom.push(paint(&[Segment::new("unknown", "⇥ placeholder · ↑ earlier prompts · ^s save as preset")]));
+                }
+            }
+            _ => {}
+        }
+        // The user's text keeps its rows; the preset's text gives way first.
+        let room = height.saturating_sub(top.len() + bottom.len());
+        if header.len() > room {
+            let hidden = header.len() + 1 - room.max(1);
+            header.truncate(room.saturating_sub(1));
+            if room > 0 {
+                header.push(paint(&[Segment::new("unknown", format!("│ … {} more lines in the preview", hidden))]));
+            }
+        }
+        top.extend(header);
+        top.extend(bottom);
+        if top.len() > height {
+            let skip = top.len() - height;
+            top.drain(2..(2 + skip).min(top.len()));
+        }
+        top
+    }
+
+    /// The editor's text wrapped to `width`, with a block cursor.
+    fn editor_text(&self, edit: &TextEdit, width: isize) -> Vec<String> {
+        let width = (width - 2).max(4) as usize;
+        let chars = edit.chars();
+        if chars.is_empty() {
+            let hint = "type here: ⏎ sends, ^j new line";
+            return vec![format!("  \x1b[7m \x1b[27m{}", self.theme.paint("unknown", hint))];
+        }
+        let mut rows: Vec<String> = Vec::new();
+        let (mut line, mut used) = (String::new(), 0usize);
+        let flush = |line: &mut String, rows: &mut Vec<String>| rows.push(format!("  {}", std::mem::take(line)));
+        for (index, &c) in chars.iter().chain(std::iter::once(&'\n')).enumerate() {
+            let at_cursor = index == edit.cursor;
+            let cell = if c == '\n' { 1 } else { display_width(&c.to_string()) };
+            if used + cell > width {
+                flush(&mut line, &mut rows);
+                used = 0;
+            }
+            let shown = if c == '\n' { " ".to_string() } else { c.to_string() };
+            if at_cursor {
+                line.push_str(&format!("\x1b[7m{}\x1b[27m", self.theme.paint("text", &shown)));
+            } else if c != '\n' {
+                line.push_str(&self.theme.paint("text", &shown));
+            }
+            used += if c == '\n' && !at_cursor { 0 } else { cell };
+            if c == '\n' {
+                flush(&mut line, &mut rows);
+                used = 0;
+            }
+        }
+        rows
     }
 
     fn worktree_preview(&self, index: usize, width: isize, height: isize) -> Vec<String> {
@@ -1784,9 +2221,13 @@ impl Picker {
         let (hints, counter): (Vec<(&str, &str)>, String) = match &self.mode {
             Mode::Branch(_) => (vec![("⏎", "next"), ("esc", "back"), ("^u", "clear")], "new worktree".into()),
             Mode::Agent { rows, .. } => {
-                (vec![("↑↓", "agent"), ("⇥", "preset"), ("⏎", "start"), ("^e", "presets"), ("esc", "back")], count(rows.len(), "agent"))
+                (vec![("↑↓", "agent"), ("⇥", "preset"), ("⏎", "start"), ("^o", "add text"), ("^e", "presets"), ("esc", "back")], count(rows.len(), "agent"))
             }
-            Mode::Custom { .. } => (vec![("⏎", "start"), ("^s", "save"), ("esc", "back"), ("^u", "clear")], "first prompt".into()),
+            Mode::Custom { target, .. } => (
+                vec![("⏎", "send"), ("^j", "new line"), ("⇥", "{placeholder}"), ("↑", "history"), ("^s", "save"), ("esc", "back")],
+                if matches!(target, Target::Running(_)) { "prompt".into() } else { "first prompt".into() },
+            ),
+            Mode::Fields { names, values, .. } => (vec![("⏎", "next"), ("esc", "back"), ("^u", "clear")], format!("field {}/{}", values.len() + 1, names.len())),
             Mode::Presets { rows, .. } => (vec![("⏎", "edit"), ("^x", "new"), ("^r", "rename"), ("⌦", "delete"), ("esc", "back")], count(rows.len(), "preset")),
             Mode::PresetName { action, .. } => (vec![("⏎", "save"), ("esc", "keep"), ("^u", "clear")],
                 match action { PresetAction::Rename(_) => "renaming", PresetAction::New => "new preset", PresetAction::Save(_) => "saving preset" }.into()),
@@ -1798,6 +2239,7 @@ impl Picker {
                         ("↑↓", "move"),
                         ("⏎", "open"),
                         ("^t", "agent"),
+                        ("^s", "send"),
                         ("^x", "new"),
                         ("^b", "PR"),
                         ("⇥", "scope"),
@@ -1938,6 +2380,87 @@ fn wrap_template(text: &str, width: isize) -> Vec<String> {
     text.split('\n').flat_map(|line| {
         if line.trim().is_empty() { vec![String::new()] } else { wrap(line, width) }
     }).collect()
+}
+
+/// How herdr addresses a running agent: its name, else its pane.
+fn agent_target(agent: &AgentHere) -> String {
+    agent.name.clone().unwrap_or_else(|| agent.pane_id.clone())
+}
+
+/// ⇥ in the prompt editor: complete the `{name` before the cursor to a
+/// placeholder, or start one (inserting `{`) when there is none. Pressing it
+/// again cycles through the candidates. Returns the placeholder shown.
+fn complete(edit: &mut TextEdit, completion: &mut Option<Completion>, step: isize, extra: &[String]) -> Result<String, String> {
+    let mut chars = edit.chars();
+    let state = match completion.take() {
+        Some(state) => {
+            // Remove the candidate shown last, back to the typed prefix.
+            chars.drain(state.brace + 1 + char_len(&state.prefix)..edit.cursor.min(chars.len()));
+            edit.cursor = state.brace + 1 + char_len(&state.prefix);
+            Completion { choice: state.choice, ..state }
+        }
+        None => {
+            let cursor = edit.cursor.min(chars.len());
+            let mut start = cursor;
+            while start > 0 && (chars[start - 1].is_ascii_lowercase() || chars[start - 1].is_ascii_digit() || chars[start - 1] == '_') {
+                start -= 1;
+            }
+            let brace = if start > 0 && chars[start - 1] == '{' {
+                start - 1
+            } else {
+                chars.insert(cursor, '{');
+                edit.cursor = cursor + 1;
+                cursor
+            };
+            let prefix: String = chars[brace + 1..edit.cursor].iter().collect();
+            Completion { brace, prefix, choice: usize::MAX }
+        }
+    };
+    // `{input}` belongs in preset files: in the user's own text it has no value.
+    let candidates: Vec<String> = session::PLACEHOLDERS.iter().map(|(name, _)| name.to_string())
+        .filter(|name| name != "input")
+        .chain(extra.iter().cloned())
+        .filter(|name| name.starts_with(&state.prefix))
+        .collect();
+    if candidates.is_empty() {
+        edit.set(&chars, edit.cursor);
+        return Err(format!("no placeholder starts with {{{}", state.prefix));
+    }
+    let count = candidates.len() as isize;
+    let choice = if state.choice == usize::MAX {
+        if step > 0 { 0 } else { candidates.len() - 1 }
+    } else {
+        (state.choice as isize + step).rem_euclid(count) as usize
+    };
+    let name = candidates[choice].clone();
+    let rest: Vec<char> = format!("{}}}", &name[state.prefix.len()..]).chars().collect();
+    let cursor = edit.cursor + rest.len();
+    chars.splice(edit.cursor..edit.cursor, rest);
+    edit.set(&chars, cursor);
+    *completion = Some(Completion { choice, ..state });
+    Ok(name)
+}
+
+/// ↑ on the editor's first line / ↓ on its last: step through earlier
+/// prompts, keeping what was being typed to come back to.
+fn recall_history(history: &[String], edit: &mut TextEdit, recall: &mut Option<(usize, String)>, older: bool) {
+    let position = match (recall.as_ref(), older) {
+        (None, true) if !history.is_empty() => history.len() - 1,
+        (None, _) => return,
+        (Some((index, _)), true) => index.saturating_sub(1),
+        (Some((index, _)), false) if index + 1 < history.len() => index + 1,
+        (Some(_), false) => {
+            let (_, draft) = recall.take().unwrap();
+            let length = char_len(&draft);
+            *edit = TextEdit { text: draft, cursor: length };
+            return;
+        }
+    };
+    let draft = recall.take().map(|(_, draft)| draft).unwrap_or_else(|| edit.text.clone());
+    let text = history[position].clone();
+    let length = char_len(&text);
+    *edit = TextEdit { text, cursor: length };
+    *recall = Some((position, draft));
 }
 
 #[cfg(test)]
@@ -2150,7 +2673,8 @@ mod tests {
             std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         env.set("PATH", &bin);
-        picker.mode = Mode::Custom { target: Target::New("test".into()), kind: "codex".into(), edit: LineEdit::default() };
+        let custom = picker.presets.len() - 1;
+        picker.mode = Mode::Custom { target: Target::New("test".into()), kind: "codex".into(), edit: TextEdit::default(), preset: custom, recall: None, completion: None };
         key(&mut picker, "ctrl+s");
         assert!(matches!(picker.mode, Mode::Custom { .. }));
         picker.insert("Review {branch} carefully", false);
@@ -2161,6 +2685,165 @@ mod tests {
         let Mode::Agent { kinds, rows, selected, preset, .. } = &picker.mode else { panic!("not back at agents") };
         assert_eq!(kinds[rows[*selected]], "codex");
         assert_eq!(picker.presets[*preset].name, "review");
+    }
+
+    fn editor(text: &str, cursor: usize) -> TextEdit {
+        TextEdit { text: text.into(), cursor }
+    }
+
+    #[test]
+    fn text_edit_keeps_pasted_lines_and_moves_between_them() {
+        let mut edit = TextEdit::default();
+        edit.insert("one\r\ntwo\tx", true);
+        assert_eq!(edit.text, "one\ntwo    x");
+        edit.insert("a\nb", false);
+        assert_eq!(edit.text, "one\ntwo    xa b", "typed text never breaks lines");
+        let mut edit = editor("first\nsecond line", 13);
+        assert!(edit.key("up"));
+        assert_eq!(edit.cursor, 5, "clamped to the shorter line");
+        assert!(!edit.key("up"), "first line: the caller recalls history");
+        assert!(edit.key("down"));
+        assert_eq!(edit.cursor, 11);
+        assert!(!edit.key("down"));
+        edit.key("ctrl+a");
+        assert_eq!(edit.cursor, 6);
+        edit.key("ctrl+e");
+        assert_eq!(edit.cursor, 17);
+        edit.key("ctrl+w");
+        assert_eq!(edit.text, "first\nsecond ");
+        edit.key("ctrl+j");
+        edit.key("alt+enter");
+        assert_eq!(edit.text, "first\nsecond \n\n");
+        edit.key("backspace");
+        edit.key("ctrl+home");
+        edit.key("delete");
+        assert_eq!((edit.text.as_str(), edit.cursor), ("irst\nsecond \n", 0));
+    }
+
+    #[test]
+    fn tab_completes_and_cycles_placeholders() {
+        let mut edit = editor("on {co", 6);
+        let mut state = None;
+        assert_eq!(complete(&mut edit, &mut state, 1, &[]).unwrap(), "commits");
+        assert_eq!((edit.text.as_str(), edit.cursor), ("on {commits}", 12));
+        // Nothing else starts with "co": cycling stays put.
+        assert_eq!(complete(&mut edit, &mut state, 1, &[]).unwrap(), "commits");
+        let mut edit = editor("see ", 4);
+        let mut state = None;
+        assert_eq!(complete(&mut edit, &mut state, 1, &["ticket".into()]).unwrap(), "branch");
+        assert_eq!(edit.text, "see {branch}");
+        assert_eq!(complete(&mut edit, &mut state, 1, &["ticket".into()]).unwrap(), "base");
+        assert_eq!(complete(&mut edit, &mut state, -1, &["ticket".into()]).unwrap(), "branch");
+        assert_eq!(complete(&mut edit, &mut state, -1, &["ticket".into()]).unwrap(), "ticket");
+        assert_eq!(edit.text, "see {ticket}");
+        let mut edit = editor("{zz", 3);
+        assert!(complete(&mut edit, &mut None, 1, &[]).unwrap_err().contains("{zz"));
+        assert_eq!(edit.text, "{zz");
+    }
+
+    #[test]
+    fn up_and_down_recall_earlier_prompts_and_the_draft() {
+        let history = vec!["old".to_string(), "newer".to_string()];
+        let mut edit = editor("draft", 5);
+        let mut recall = None;
+        recall_history(&history, &mut edit, &mut recall, true);
+        assert_eq!(edit.text, "newer");
+        recall_history(&history, &mut edit, &mut recall, true);
+        recall_history(&history, &mut edit, &mut recall, true);
+        assert_eq!(edit.text, "old");
+        recall_history(&history, &mut edit, &mut recall, false);
+        assert_eq!(edit.text, "newer");
+        recall_history(&history, &mut edit, &mut recall, false);
+        assert_eq!((edit.text.as_str(), edit.cursor, recall.is_none()), ("draft", 5, true));
+        recall_history(&[], &mut edit, &mut recall, true);
+        assert_eq!(edit.text, "draft");
+    }
+
+    fn select_preset(picker: &mut Picker, name: &str) {
+        let index = picker.presets.iter().position(|preset| preset.name == name).unwrap();
+        if let Mode::Agent { preset, .. } = &mut picker.mode {
+            *preset = index;
+        }
+    }
+
+    #[test]
+    fn ctrl_o_adds_text_under_the_preset() {
+        let _lock = env_lock();
+        let tmp = TempDir::new();
+        let mut env = EnvVars::new();
+        env.set("HERDR_PLUGIN_STATE_DIR", tmp.path().join("state"));
+        let mut picker = preset_picker(tmp.path(), &mut env);
+        select_preset(&mut picker, "plan");
+        key(&mut picker, "ctrl+o");
+        let Mode::Custom { kind, preset, .. } = &picker.mode else { panic!("editor not open") };
+        assert_eq!((kind.as_str(), picker.presets[*preset].name.as_str()), ("codex", "plan"));
+        picker.insert("focus on the parser", false);
+        let rows = plain(&mut picker, 120, 40);
+        let screen = rows.join("\n");
+        assert!(screen.contains("preset plan") && screen.contains("│ You are in the git worktree"), "{screen}");
+        assert!(screen.contains("your text goes below the preset") && screen.contains("focus on the parser"));
+        let preview_order = screen.find("Do not change code yet").unwrap() < screen.rfind("focus on the parser").unwrap();
+        assert!(preview_order, "the preview shows the preset, then the added text");
+        // esc returns to the same agent and preset.
+        key(&mut picker, "esc");
+        let Mode::Agent { kinds, rows, selected, preset, .. } = &picker.mode else { panic!() };
+        assert_eq!((kinds[rows[*selected]].as_str(), picker.presets[*preset].name.as_str()), ("codex", "plan"));
+    }
+
+    #[test]
+    fn enter_opens_the_editor_for_ask_and_input_presets_and_asks_for_fields() {
+        let _lock = env_lock();
+        let tmp = TempDir::new();
+        let mut env = EnvVars::new();
+        let dir = tmp.path().join("presets");
+        presets::seed(&dir).unwrap();
+        std::fs::write(dir.join("rules.md"), "---\nask: true\n---\nFollow the rules.").unwrap();
+        std::fs::write(dir.join("wrap.md"), "Task: {input}").unwrap();
+        std::fs::write(dir.join("ticket.md"), "Fix {ticket} for {owner}.").unwrap();
+        let mut picker = preset_picker(tmp.path(), &mut env);
+        for name in ["rules", "wrap"] {
+            select_preset(&mut picker, name);
+            key(&mut picker, "enter");
+            assert!(matches!(picker.mode, Mode::Custom { .. }), "{name}");
+            key(&mut picker, "esc");
+        }
+        select_preset(&mut picker, "ticket");
+        key(&mut picker, "enter");
+        let Mode::Fields { names, .. } = &picker.mode else { panic!("fields not asked") };
+        assert_eq!(names, &["ticket", "owner"]);
+        key(&mut picker, "enter");
+        assert_eq!(picker.status.as_ref().unwrap().0, "type a value for {ticket}");
+        picker.insert("ABC-1", false);
+        key(&mut picker, "enter");
+        let screen = plain(&mut picker, 120, 30).join("\n");
+        assert!(screen.contains("owner ❯") && screen.contains("{ticket}  ABC-1") && screen.contains("Fix ABC-1 for {owner}."), "{screen}");
+        key(&mut picker, "esc");
+        assert!(matches!(picker.mode, Mode::Agent { .. }), "esc goes back to where the prompt came from");
+    }
+
+    #[test]
+    fn ctrl_s_needs_a_running_agent() {
+        let _lock = env_lock();
+        let tmp = TempDir::new();
+        let mut env = EnvVars::new();
+        let mut picker = preset_picker(tmp.path(), &mut env);
+        picker.worktrees = vec![Worktree { path: "/repo".into(), branch: Some("main".into()), ..Worktree::default() }];
+        picker.prs = vec![PrInfo::unknown("test")];
+        picker.agents = vec![Vec::new()];
+        picker.facts = vec![None];
+        picker.mode = Mode::List;
+        picker.order = vec![0];
+        picker.rebuild_items();
+        key(&mut picker, "ctrl+s");
+        assert!(picker.status.as_ref().unwrap().0.contains("no agent is running"));
+        picker.agents = vec![vec![AgentHere { name: Some("claude-main".into()), kind: "claude".into(), status: "working".into(), cwd: "/repo".into(), pane_id: "p1".into() }]];
+        key(&mut picker, "ctrl+s");
+        let Mode::Agent { target: Target::Running(0), kinds, .. } = &picker.mode else { panic!("not sending") };
+        assert_eq!(kinds, &["claude-main"]);
+        let screen = plain(&mut picker, 120, 30).join("\n");
+        assert!(screen.contains("send ❯") && screen.contains("claude-main"), "{screen}");
+        key(&mut picker, "ctrl+o");
+        assert!(matches!(&picker.mode, Mode::Custom { target: Target::Running(0), kind, .. } if kind == "claude-main"));
     }
 
     #[test]
