@@ -253,11 +253,7 @@ fn write_cache(path: &std::path::Path, snapshot: &PrSnapshot) -> std::io::Result
     let temporary = path.with_extension(format!("json.{}.{}.tmp", std::process::id(), NEXT_TEMP.fetch_add(1, Ordering::Relaxed)));
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
+    crate::host::owner_only(&mut options);
     let mut file = options.open(&temporary)?;
     let result = (|| {
         file.write_all(pyjson::dumps(&encode_snapshot(snapshot), false).as_bytes())?;
@@ -318,19 +314,18 @@ pub fn classify(wt: &Worktree, repo: &GhRepo, default_branch: Option<&str>, snap
 
 /// Launch a detached browser helper without inheriting the popup's TTY.
 pub fn open_url(url: &str) -> Result<(), String> {
-    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+    // On Windows the URL protocol handler opens the default browser; `cmd /c
+    // start` would read `&` and `^` in the URL as shell syntax.
+    let (opener, args): (&str, &[&str]) = if cfg!(windows) {
+        ("rundll32.exe", &["url.dll,FileProtocolHandler"])
+    } else if cfg!(target_os = "macos") {
+        ("open", &[])
+    } else {
+        ("xdg-open", &[])
+    };
     let mut command = Command::new(opener);
-    command.arg(url).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        // Only an async-signal-safe syscall is used between fork and exec.
-        unsafe {
-            command.pre_exec(|| {
-                if libc::setsid() == -1 { Err(std::io::Error::last_os_error()) } else { Ok(()) }
-            });
-        }
-    }
+    command.args(args).arg(url).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    crate::host::detach(&mut command);
     let mut child = command.spawn().map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             format!("{opener} not installed")

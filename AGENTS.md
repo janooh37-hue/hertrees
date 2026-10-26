@@ -22,7 +22,8 @@ or configure it, read [docs/agents.md](docs/agents.md). This file is for changin
   display widths and Python-compatible helpers originally derived from herdr-bar (MIT, LICENSE.herdr-bar).
 - `src/client.rs`, `src/host.rs`, `src/opener.rs`, `src/proc.rs`, `src/par.rs`:
   Herdr/OS/process integration; `src/testutil.rs`: test fixtures and environment isolation.
-- `scripts/install.sh`: release build and atomic replacement of `bin/hertrees`.
+- `scripts/install.sh`: release build and atomic replacement of `bin/hertrees`;
+  `scripts/install.ps1` is the Windows build step (`bin\hertrees.exe` plus an extensionless copy).
 - `scripts/e2e.sh`: disposable live Herdr/Claude integration exercise.
 - `branding/`: public brand assets and usage guide; see `branding/README.md`. `branding/terminal/`
   is compiled in (`include_str!` in `render.rs`, `cli.rs`), so keep those paths.
@@ -36,7 +37,7 @@ Use the mise-managed Rust toolchain:
 ```sh
 mise exec -- cargo build --release --locked
 mise exec -- cargo test --release
-sh scripts/install.sh
+sh scripts/install.sh   # Windows: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1
 ```
 
 The first command builds `target/release/hertrees`; the install script also updates the
@@ -63,10 +64,10 @@ UI conventions and its attribution rather than introducing a second input/layout
   the test folder is safe, send `down` then `enter`, not `enter` alone.
 - Herdr `pane send-keys` has no `delete` key name. To drive the popup's forward-delete
   binding, send CSI `ESC[3~` through `pane send-text` instead.
-- Editor commands may include arguments: preserve the `sh -c` invocation and separately
-  passed filename in `presets::open_editor`. The agent shell has `EDITOR=true`; for live
-  editor tests, explicitly choose a real editor or a deterministic editing script
-  (and account for `VISUAL` taking precedence).
+- Editor commands may include arguments: preserve the `sh -c` invocation (`cmd /S /C` on
+  Windows) and separately passed filename in `presets::open_editor`. The agent shell has
+  `EDITOR=true`; for live editor tests, explicitly choose a real editor or a deterministic
+  editing script (and account for `VISUAL` taking precedence).
 - Cleanup (`session::remove_worktree`): herdr's `worktree.remove` needs the space's
   `workspace_id`, closes it, keeps the branch and refuses dirty checkouts; a worktree
   with no space goes through `git worktree remove`. Never pass `force`. Delete the branch

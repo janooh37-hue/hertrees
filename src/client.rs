@@ -12,6 +12,7 @@ use std::fmt;
 use std::io;
 #[cfg(unix)]
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::time::Duration;
 
 /// What kind of failure, as the Python release told them apart by class.

@@ -9,14 +9,12 @@ const KINDS: &[&str] = &["claude", "codex", "omp", "opencode", "pi", "gemini", "
 
 /// Supported, executable agents in configuration order (or the order of `KINDS`).
 pub fn installed_agents(preferred: &[String]) -> Vec<String> {
-    let Some(path) = std::env::var_os("PATH") else { return Vec::new() };
-    let dirs: Vec<_> = std::env::split_paths(&path).collect();
     let candidates: Vec<&str> = if preferred.is_empty() { KINDS.to_vec() } else { preferred.iter().map(String::as_str).collect() };
     let mut result = Vec::new();
     for kind in candidates {
         if !KINDS.contains(&kind) || result.iter().any(|s| s == kind) { continue; }
         let executable = if kind == "cursor" { "cursor-agent" } else { kind };
-        if dirs.iter().any(|dir| crate::opener::is_executable_file(&dir.join(executable))) {
+        if crate::opener::on_path(executable) {
             result.push(kind.to_owned());
         }
     }
@@ -317,7 +315,6 @@ fn wait_ready(client: &mut HerdrClient, agent: &str, limit: Duration) -> Readine
 
 fn defer_prompt(agent: &str, prompt: &str) -> Result<(), String> {
     use std::io::Write;
-    use std::os::unix::process::CommandExt;
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let dir = crate::config::state_dir().filter(|dir| dir.is_absolute()).unwrap_or_else(std::env::temp_dir);
@@ -325,14 +322,16 @@ fn defer_prompt(agent: &str, prompt: &str) -> Result<(), String> {
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
     let path = dir.join(format!("hertrees-prompt-{}-{stamp}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
     let result = (|| {
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path).map_err(|e| format!("Cannot save deferred prompt: {e}"))?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        crate::host::owner_only(&mut options);
+        let mut file = options.open(&path).map_err(|e| format!("Cannot save deferred prompt: {e}"))?;
         file.write_all(prompt.as_bytes()).map_err(|e| format!("Cannot save deferred prompt: {e}"))?;
         let executable = std::env::current_exe().map_err(|e| format!("Cannot defer prompt: {e}"))?;
         let mut command = std::process::Command::new(executable);
         command.arg("--send-prompt").arg(agent).arg(&path)
             .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
-        unsafe { command.pre_exec(|| { if libc::setsid() < 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) } }); }
+        crate::host::detach(&mut command);
         command.spawn().map_err(|e| format!("Cannot defer prompt: {e}"))?;
         Ok(())
     })();

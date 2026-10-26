@@ -3188,7 +3188,7 @@ mod tests {
         let mut picker = preset_picker(tmp.path(), &mut env);
         let bin = tmp.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
-        let executable = bin.join("codex");
+        let executable = bin.join(format!("codex{}", std::env::consts::EXE_SUFFIX));
         std::fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
         #[cfg(unix)]
         {
@@ -3288,7 +3288,7 @@ mod tests {
         let bin = tmp.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         for name in ["claude", "codex"] {
-            let executable = bin.join(name);
+            let executable = bin.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
             std::fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
             #[cfg(unix)]
             {

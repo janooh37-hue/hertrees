@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Windows: the plugin builds and runs there. `scripts/install.ps1` is the Windows build
+  step, and `hertrees.open-windows` is the action to bind. Agents are found on `PATH` by
+  their `PATHEXT` extension (`claude.exe`, `omp.cmd`), PR links open in the default
+  browser, the preset editor runs through `cmd` (`nvim`, else Notepad), and headless
+  commands find Herdr's `%APPDATA%` and `%LOCALAPPDATA%` plugin directories.
+
 ## 0.2.6 (2026-10-25)
 
 - Headless clean up: `hertrees clean --path CHECKOUT` or `--merged` does what `alt+d` /

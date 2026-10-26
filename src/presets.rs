@@ -247,15 +247,28 @@ pub fn remember(text: &str) {
 pub fn open_editor(path: &Path) -> Result<(), String> {
     let editor = ["VISUAL", "EDITOR"].iter().find_map(|key| std::env::var(key).ok().filter(|value| !value.trim().is_empty()))
         .unwrap_or_else(|| {
-            let nvim = std::env::var_os("PATH").map(|paths| std::env::split_paths(&paths).any(|dir| {
-                let file = dir.join("nvim");
-                crate::opener::is_executable_file(&file)
-            })).unwrap_or(false);
-            if nvim { "nvim".into() } else { "vi".into() }
+            if crate::opener::on_path("nvim") { "nvim".into() } else if cfg!(windows) { "notepad".into() } else { "vi".into() }
         });
-    let status = Command::new("sh").arg("-c").arg(format!("{} \"$1\"", editor)).arg("sh").arg(path)
-        .status().map_err(|error| error.to_string())?;
+    let status = editor_command(&editor, path).status().map_err(|error| error.to_string())?;
     if status.success() { Ok(()) } else { Err(format!("editor exited with {}", status)) }
+}
+
+/// The editor value is a command line of its own (`code --wait`), so a shell runs it.
+#[cfg(not(windows))]
+fn editor_command(editor: &str, path: &Path) -> Command {
+    let mut command = Command::new("sh");
+    command.arg("-c").arg(format!("{} \"$1\"", editor)).arg("sh").arg(path);
+    command
+}
+
+/// The editor value is a command line of its own (`code --wait`), so cmd runs it.
+#[cfg(windows)]
+fn editor_command(editor: &str, path: &Path) -> Command {
+    use std::os::windows::process::CommandExt;
+    // `/S` strips only the outer quotes, leaving `<editor> "<path>"` as typed.
+    let mut command = Command::new("cmd.exe");
+    command.raw_arg(format!("/D /S /C \"{} \"{}\"\"", editor, path.display()));
+    command
 }
 
 #[cfg(test)]
