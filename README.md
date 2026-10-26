@@ -24,9 +24,9 @@ any of them or in a brand-new worktree.
 
 ## Quick start
 
-Needs Herdr 0.9.3+ on Linux or macOS, `git`, and an authenticated `gh` for PR state
-(optional). Herdr builds the plugin from source on install, so Rust 1.88+ is required
-([rustup](https://rustup.rs)).
+Needs Herdr 0.9.3+ on Linux, macOS or Windows, `git`, and an authenticated `gh` for PR
+state (optional). Herdr builds the plugin from source on install, so Rust 1.88+ is
+required ([rustup](https://rustup.rs); on Windows with the MSVC toolchain).
 
 1. Install:
 
@@ -34,7 +34,8 @@ Needs Herdr 0.9.3+ on Linux or macOS, `git`, and an authenticated `gh` for PR st
    herdr plugin install janooh37-hue/hertrees
    ```
 
-2. Bind a key (Herdr adds none) in `~/.config/herdr/config.toml`:
+2. Bind a key (Herdr adds none) in `~/.config/herdr/config.toml`
+   (`%APPDATA%\herdr\config.toml` on Windows):
 
    ```toml
    [[keys.command]]
@@ -47,6 +48,9 @@ Needs Herdr 0.9.3+ on Linux or macOS, `git`, and an authenticated `gh` for PR st
    `prefix+w` is Herdr's workspace picker by default. This binding takes precedence, but
    to free the key explicitly, add `workspace_picker = ""` to your `[keys]` table (create
    it if the file has none). Then run `herdr server reload-config`.
+
+   On Windows the action is `hertrees.open-windows`: Herdr allows one id per action, and
+   the `open` one runs through `sh`.
 
 3. Press `prefix+w` in any pane of a git project.
 

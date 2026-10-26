@@ -33,6 +33,21 @@ pub fn is_executable_file(path: &std::path::Path) -> bool {
     std::fs::metadata(path).map(|m| m.is_file()).unwrap_or(false)
 }
 
+/// Whether `name` is a program on PATH. Windows runs it by extension, so
+/// there each `PATHEXT` suffix is tried (`claude.exe`, `omp.cmd`).
+pub fn on_path(name: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else { return false };
+    let suffixes: Vec<String> = if cfg!(windows) {
+        std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into())
+            .split(';').filter(|suffix| !suffix.is_empty()).map(str::to_owned).collect()
+    } else {
+        vec![String::new()]
+    };
+    std::env::split_paths(&path).any(|dir| {
+        suffixes.iter().any(|suffix| is_executable_file(&dir.join(format!("{name}{suffix}"))))
+    })
+}
+
 /// `hertrees --open`: replace this process with `herdr plugin pane open …`.
 pub fn open_picker() -> i32 {
     let mut process = std::process::Command::new(herdr_bin());

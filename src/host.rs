@@ -4,7 +4,8 @@
 //! per platform lives here, so the modules above read the same everywhere:
 //!
 //! * the Windows named pipe behind `HERDR_SOCKET_PATH`,
-//! * how old a process is.
+//! * detaching a helper process from the popup,
+//! * owner-only files.
 //!
 //! The terminal itself is the one exception: it has a backend per platform
 //! under `term`.
@@ -205,37 +206,36 @@ pub fn pipe_request(_name: &str, _payload: &[u8], _timeout: f64) -> io::Result<V
     Err(io::Error::new(io::ErrorKind::Unsupported, "named pipes exist only on Windows"))
 }
 
-// -- process age -------------------------------------------------------------
+// -- detached helpers and private files ---------------------------------------
 
-/// Seconds since `pid` started, or None if Windows will not say.
-///
-/// The kernel keeps the creation time of every process; no `ps` needed.
+/// Start `command` outside the popup's session, so it outlives the popup.
+#[cfg(unix)]
+pub fn detach(command: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
+    // Only an async-signal-safe syscall is used between fork and exec.
+    unsafe {
+        command.pre_exec(|| if libc::setsid() == -1 { Err(io::Error::last_os_error()) } else { Ok(()) });
+    }
+}
+
+/// Start `command` without the popup's console, so it outlives the popup.
 #[cfg(windows)]
-pub fn process_age(pid: i128) -> Option<f64> {
-    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
-    use windows_sys::Win32::System::SystemInformation::GetSystemTimeAsFileTime;
-    use windows_sys::Win32::System::Threading::{GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
-    let pid: u32 = u32::try_from(pid).ok()?;
-    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-    if handle.is_null() {
-        return None;
+pub fn detach(command: &mut std::process::Command) {
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS};
+    command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+}
+
+/// Make a file `options` creates readable by its owner only (0600). On
+/// Windows it inherits the ACL of its directory, which under the user
+/// profile already shuts out other users.
+#[cfg_attr(not(unix), allow(unused_variables))]
+pub fn owner_only(options: &mut std::fs::OpenOptions) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
     }
-    let zero = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
-    let (mut created, mut exited, mut kernel, mut user) = (zero, zero, zero, zero);
-    let ok = unsafe { GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user) };
-    unsafe {
-        CloseHandle(handle);
-    }
-    if ok == 0 {
-        return None;
-    }
-    let mut now = zero;
-    unsafe {
-        GetSystemTimeAsFileTime(&mut now);
-    }
-    let value = |t: FILETIME| (t.dwLowDateTime as u64 | ((t.dwHighDateTime as u64) << 32)) as i128;
-    // FILETIME counts 100-nanosecond intervals.
-    Some(((value(now) - value(created)) as f64 / 1e7).max(0.0))
 }
 
 
@@ -247,13 +247,5 @@ mod tests {
         let path = r"C:\Users\me\AppData\Roaming\herdr\herdr.sock";
         assert_eq!(pipe_name(path), format!("{}{}", r"\\.\pipe\", path));
         assert_eq!(pipe_name(&pipe_name(path)), pipe_name(path));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn own_process_has_an_age_and_a_missing_pid_has_none() {
-        let age = process_age(std::process::id() as i128).unwrap();
-        assert!((0.0..24.0 * 3600.0).contains(&age));
-        assert!(process_age(0x7FFFFFF1).is_none());
     }
 }

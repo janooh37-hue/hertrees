@@ -757,6 +757,8 @@ mod tests {
         assert_eq!(finish_prompt("{ticket} {owner} {team}", vars, &parsed.vars, None, None).unwrap_err(), "the prompt needs --var owner=VALUE --var team=VALUE");
     }
 
+    // Symlinks need Developer Mode or admin rights on Windows.
+    #[cfg(unix)]
     #[test]
     fn checkout_matching_canonicalizes_and_trims_missing_paths() {
         use std::os::unix::fs::symlink;
