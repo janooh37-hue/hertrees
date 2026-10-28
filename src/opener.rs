@@ -1,7 +1,11 @@
-//! Find the Herdr binary, and open the picker's popup through it.
+//! Find the Herdr binary, and open the picker's popup through Herdr or tmux.
 
 pub const POPUP_ARGS: &[&str] =
     &["plugin", "pane", "open", "--plugin", "hertrees", "--entrypoint", "picker", "--placement", "popup"];
+
+/// tmux's popup with the plugin's geometry (`herdr-plugin.toml`), started in
+/// the focused pane's directory so the picker shows that pane's project.
+pub const TMUX_POPUP_ARGS: &[&str] = &["display-popup", "-E", "-w", "74%", "-h", "62%", "-d", "#{pane_current_path}", "--"];
 
 /// The Herdr binary to shell out to.
 ///
@@ -48,15 +52,33 @@ pub fn on_path(name: &str) -> bool {
     })
 }
 
-/// `hertrees --open`: replace this process with `herdr plugin pane open …`.
+/// `hertrees --open`: replace this process with `herdr plugin pane open …`,
+/// or under tmux with `tmux display-popup … hertrees`.
 pub fn open_picker() -> i32 {
-    let mut process = std::process::Command::new(herdr_bin());
-    process.args(POPUP_ARGS);
+    let (program, mut process) = match crate::mux::kind_from_env() {
+        crate::mux::Kind::Herdr => {
+            let mut process = std::process::Command::new(herdr_bin());
+            process.args(POPUP_ARGS);
+            ("herdr", process)
+        }
+        crate::mux::Kind::Tmux => {
+            let executable = match std::env::current_exe() {
+                Ok(executable) => executable,
+                Err(error) => {
+                    eprintln!("hertrees: cannot find this executable: {}", crate::host::os_error_str(&error));
+                    return 2;
+                }
+            };
+            let mut process = std::process::Command::new("tmux");
+            process.args(TMUX_POPUP_ARGS).arg(executable);
+            ("tmux", process)
+        }
+    };
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         let error = process.exec();
-        eprintln!("hertrees: could not run herdr: {}", crate::host::os_error_str(&error));
+        eprintln!("hertrees: could not run {program}: {}", crate::host::os_error_str(&error));
         2
     }
     #[cfg(not(unix))]
@@ -64,7 +86,7 @@ pub fn open_picker() -> i32 {
         match process.status() {
             Ok(status) => status.code().unwrap_or(1),
             Err(error) => {
-                eprintln!("hertrees: could not run herdr: {}", crate::host::os_error_str(&error));
+                eprintln!("hertrees: could not run {program}: {}", crate::host::os_error_str(&error));
                 2
             }
         }

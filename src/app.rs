@@ -3,11 +3,11 @@
 //! Portions derived from herdr-bar (MIT, see LICENSE.herdr-bar). The rows are a project's worktrees instead of
 //! Herdr's tabs, and Enter can start an agent session as well as jump.
 
-use crate::client::HerdrClient;
 use crate::config::{Config, SCOPES};
 use crate::fuzzy::{match_prepared, split_query, Term};
 use crate::keys::{Event, KeyDecoder, MouseKind};
 use crate::model::{AgentHere, GitFacts, PrInfo, PrState, Project, Space, Worktree};
+use crate::mux::{Mux, Started};
 use crate::paint::Painter;
 use crate::pr::{self, GhRepo, PrSnapshot};
 use crate::presets::{self, Preset};
@@ -15,7 +15,7 @@ use crate::project;
 use crate::pyjson;
 use crate::pystr;
 use crate::render::{self, compute_layout, scrollbar_column, Item, Layout, Meta, Row, Segment};
-use crate::session::{self, PromptVars, Started};
+use crate::session::{self, PromptVars};
 use crate::term::Terminal;
 use crate::textutil::{display_width, pad, sanitize, truncate};
 use crate::theme::Theme;
@@ -396,13 +396,13 @@ pub struct Loaded {
 }
 
 impl Loaded {
-    pub fn load(client: &mut HerdrClient, cwd: Option<&str>) -> Loaded {
+    pub fn load(mux: &mut dyn Mux, cwd: Option<&str>) -> Loaded {
         let result = match cwd {
-            Some(cwd) => project::load(client, cwd),
+            Some(cwd) => project::load(mux, cwd),
             None => Err("no working directory: open the picker from a pane".into()),
         };
-        let agents = project::agents(client);
-        let spaces = project::spaces(client);
+        let agents = mux.agents();
+        let spaces = mux.spaces();
         let (gh, cached, branch_times) = match &result {
             Ok((project, _)) => {
                 let gh = pr::github_repo(&project.repo_root);
@@ -432,7 +432,7 @@ fn branch_times(repo_root: &str) -> BTreeMap<String, i64> {
 }
 
 pub struct Picker {
-    pub client: HerdrClient,
+    pub mux: Box<dyn Mux>,
     pub config: Config,
     presets: Vec<Preset>,
     presets_dir: Option<PathBuf>,
@@ -489,14 +489,14 @@ pub struct Picker {
 }
 
 impl Picker {
-    pub fn new(client: HerdrClient, config: Config, theme: Theme, loaded: Loaded) -> Picker {
+    pub fn new(mux: Box<dyn Mux>, config: Config, theme: Theme, loaded: Loaded) -> Picker {
         let (tx, rx) = channel();
         let preview_enabled = config.preview_starts_on();
         let scope = config.scope;
         let presets_dir = presets::dir();
         let presets = presets::load(presets_dir.as_deref(), None);
         let mut picker = Picker {
-            client,
+            mux,
             config,
             presets,
             presets_dir,
@@ -966,8 +966,8 @@ impl Picker {
         if self.project.is_none() {
             return;
         }
-        let agents = project::agents(&mut self.client);
-        let spaces = project::spaces(&mut self.client);
+        let agents = self.mux.agents();
+        let spaces = self.mux.spaces();
         let summary = |picker: &Picker| -> Vec<Vec<(String, String, String)>> {
             picker.agents.iter().map(|l| l.iter().map(|a| (a.pane_id.clone(), a.status.clone(), a.tab_id.clone())).collect()).collect()
         };
@@ -984,7 +984,7 @@ impl Picker {
         let Some(project) = &self.project else { return };
         let cwd = project.source_checkout.clone();
         let keep = self.selected_index().map(|i| self.worktrees[i].path.clone());
-        let loaded = Loaded::load(&mut self.client, Some(&cwd));
+        let loaded = Loaded::load(self.mux.as_mut(), Some(&cwd));
         let snapshot = self.snapshot.take();
         self.take(Loaded { cached: loaded.cached.or(snapshot), ..loaded });
         self.fetch_prs();
@@ -1179,8 +1179,8 @@ impl Picker {
                     return None;
                 }
                 let result = match what {
-                    Rename::Space { id, .. } => session::rename_space(&mut self.client, id, &label),
-                    Rename::Tab { id, .. } => session::rename_tab(&mut self.client, id, &label),
+                    Rename::Space { id, .. } => self.mux.rename_space(id, &label),
+                    Rename::Tab { id, .. } => self.mux.rename_tab(id, &label),
                 };
                 self.mode = Mode::List;
                 match result {
@@ -1270,8 +1270,8 @@ impl Picker {
             _ => return None,
         }
         let closed = match removal {
-            Removal::Space { id, label } => session::close_space(&mut self.client, &id).map(|()| format!("closed space “{}”", label)),
-            Removal::Tab { id, label } => session::close_tab(&mut self.client, &id).map(|()| format!("closed tab “{}”", label)),
+            Removal::Space { id, label } => self.mux.close_space(&id).map(|()| format!("closed space “{}”", label)),
+            Removal::Tab { id, label } => self.mux.close_tab(&id).map(|()| format!("closed tab “{}”", label)),
             Removal::Worktrees(list) => {
                 self.remove_worktrees(list);
                 return None;
@@ -1289,7 +1289,7 @@ impl Picker {
     fn remove_worktrees(&mut self, list: Vec<usize>) {
         let Some(project) = self.project.clone() else { return };
         let jobs: Vec<(Worktree, bool)> = list.iter().map(|&i| (self.worktrees[i].clone(), self.deletes_branch(i))).collect();
-        let mut client = self.client.clone();
+        let mut mux = self.mux.clone();
         let tx = self.tx.clone();
         self.mode = Mode::Busy(match jobs.as_slice() {
             [(wt, _)] => format!("cleaning up {}…", wt.title()),
@@ -1298,7 +1298,7 @@ impl Picker {
         std::thread::spawn(move || {
             let (mut done, mut failed) = (Vec::new(), Vec::new());
             for (wt, delete_branch) in &jobs {
-                match session::remove_worktree(&mut client, &project, wt, *delete_branch) {
+                match session::remove_worktree(mux.as_mut(), &project, wt, *delete_branch) {
                     Ok(removed) => done.push(removed.message),
                     Err(error) => failed.push(format!("{}: {}", wt.title(), error)),
                 }
@@ -1852,7 +1852,7 @@ impl Picker {
         };
         let taken = self.agent_names.clone();
         let label = Some(self.new_label.clone()).filter(|label| !label.is_empty());
-        let mut client = self.client.clone();
+        let mut mux = self.mux.clone();
         let tx = self.tx.clone();
         self.mode = Mode::Busy(match target {
             Target::Running(_) => format!("sending to {}…", kind),
@@ -1863,7 +1863,7 @@ impl Picker {
             session::fill_lazy(&mut vars, &template, checkout.as_deref(), pr_url.as_deref());
             let prompt = if template.is_empty() { String::new() } else { session::expand_prompt(&template, &vars) };
             if let Target::Running(_) = target {
-                let result = session::send_to(&mut client, &kind, &prompt).map(|deferred| (kind, deferred));
+                let result = mux.send_to(&kind, &prompt).map(|deferred| (kind, deferred));
                 let _ = tx.send(Msg::Sent(result));
                 return;
             }
@@ -1873,13 +1873,13 @@ impl Picker {
             };
             let prompt = if prompt.is_empty() { None } else { Some(prompt.as_str()) };
             let result = match (&target, worktree) {
-                (Target::New(branch), _) if kind == SHELL => session::create_shell(&mut client, &project, branch, base.as_deref(), label.as_deref()),
+                (Target::New(branch), _) if kind == SHELL => session::create_shell(mux.as_mut(), &project, branch, base.as_deref(), label.as_deref()),
                 (Target::New(branch), _) => {
-                    session::start_new(&mut client, &project, branch, base.as_deref(), label.as_deref(), &kind, prompt, &taken, &mut progress)
+                    session::start_new(mux.as_mut(), &project, branch, base.as_deref(), label.as_deref(), &kind, prompt, &taken, &mut progress)
                 }
-                (Target::Existing(_), Some(wt)) if kind == SHELL => session::open_tab(&mut client, &project, &wt, &mut progress),
+                (Target::Existing(_), Some(wt)) if kind == SHELL => session::open_tab(mux.as_mut(), &project, &wt, &mut progress),
                 (Target::Existing(_), Some(wt)) => {
-                    session::start_existing(&mut client, &project, &wt, &kind, prompt, &taken, &mut progress)
+                    session::start_existing(mux.as_mut(), &project, &wt, &kind, prompt, &taken, &mut progress)
                 }
                 (_, None) | (Target::Running(_), _) => Err("worktree disappeared".into()),
             };
@@ -2997,7 +2997,7 @@ mod tests {
             result: Err("test without a project".into()), agents: Vec::new(), spaces: None, gh: Err("no remote".into()),
             cached: None, branch_times: BTreeMap::new(),
         };
-        let mut picker = Picker::new(HerdrClient::new(Some("/nonexistent/hertrees-test".into()), 0.001, true),
+        let mut picker = Picker::new(Box::new(crate::client::HerdrClient::new(Some("/nonexistent/hertrees-test".into()), 0.001, true)),
             Config::default(), Theme::new(None, None, None), loaded);
         picker.mode = Mode::Agent {
             target: Target::New("test".into()), edit: LineEdit::default(),

@@ -1,11 +1,11 @@
 //! Command line entry point.
 
 use crate::app::{Loaded, Outcome, Picker};
-use crate::client::HerdrClient;
 use crate::config::Config;
 use crate::host;
 use crate::icons;
 use crate::model::{PrInfo, PrState, Project, Worktree};
+use crate::mux::{self, Mux};
 use crate::opener::open_picker;
 use crate::presets::{self, Preset};
 use crate::project;
@@ -28,7 +28,7 @@ usage: hertrees [options]
        hertrees clean [--cwd PATH] (--path CHECKOUT | --merged) [--dry-run]
 
 options:
-  --open           open the picker popup through the Herdr CLI
+  --open           open the picker popup: Herdr's, or tmux's display-popup under tmux
   --list           print the worktrees the picker would show, as JSON
   --cwd PATH       use the project at PATH instead of the focused pane's
   --version        print the plugin version
@@ -44,7 +44,7 @@ subcommands:
     --var N=VALUE  value for a placeholder the prompt defines itself, e.g. {ticket}
     --focus        focus the started session (default: leave focus unchanged)
   send             prompt an agent already running in the project (--agent NAME is its
-                   herdr name or pane id); a busy agent gets it once it is idle
+                   name or pane id); under Herdr a busy agent gets it once it is idle
   clean            remove a finished worktree: close its space, remove the checkout, and
                    delete the branch when GitHub merged it at its current commit
     --merged       every worktree whose PR is merged and that is safe to remove
@@ -58,6 +58,9 @@ subcommands:
 
 Normally Herdr launches this itself:
   herdr plugin action invoke open --plugin hertrees
+Under tmux (outside Herdr), bind it, e.g. in ~/.tmux.conf:
+  bind-key w run-shell '/path/to/hertrees --open'
+HERTREES_MUX=herdr|tmux chooses when both are present (one nested in the other).
 ";
 
 /// The truecolor mark; its background cells are the brand ink.
@@ -273,9 +276,9 @@ fn start(args: &[String]) -> Result<(), String> {
     if args.agent != "shell" && session::installed_agents(std::slice::from_ref(&args.agent)).is_empty() {
         return Err(format!("unknown or uninstalled agent kind: {}", args.agent));
     }
-    let mut client = HerdrClient::from_env();
+    let mut mux = mux::from_env();
     let cwd = args.cwd.clone().or_else(|| source_cwd(&[])).ok_or("no working directory: use --cwd PATH")?;
-    let (project, worktrees) = project::load(&mut client, &cwd)?;
+    let (project, worktrees) = project::load(mux.as_mut(), &cwd)?;
     let template = resolve_prompt(&args, &presets::load(presets::dir().as_deref(), Some(&project.repo_root)))?;
     let new_worktree;
     let wt = if let Some(path) = &args.path {
@@ -292,18 +295,18 @@ fn start(args: &[String]) -> Result<(), String> {
     let prompt = if prompt.is_empty() { None } else { Some(prompt.as_str()) };
     let started = if args.agent == "shell" {
         match &args.branch {
-            Some(branch) => session::create_shell(&mut client, &project, branch, args.base.as_deref(), args.label.as_deref())?,
-            None => session::open_tab(&mut client, &project, wt, &mut |_| {})?,
+            Some(branch) => session::create_shell(mux.as_mut(), &project, branch, args.base.as_deref(), args.label.as_deref())?,
+            None => session::open_tab(mux.as_mut(), &project, wt, &mut |_| {})?,
         }
     } else {
-        let taken = project::agents(&mut client).into_iter().filter_map(|agent| agent.name).collect::<Vec<_>>();
+        let taken = mux.agents().into_iter().filter_map(|agent| agent.name).collect::<Vec<_>>();
         if let Some(branch) = &args.branch {
-            session::start_new(&mut client, &project, branch, args.base.as_deref(), args.label.as_deref(), &args.agent, prompt, &taken, &mut |_| {})?
+            session::start_new(mux.as_mut(), &project, branch, args.base.as_deref(), args.label.as_deref(), &args.agent, prompt, &taken, &mut |_| {})?
         } else {
-            session::start_existing(&mut client, &project, wt, &args.agent, prompt, &taken, &mut |_| {})?
+            session::start_existing(mux.as_mut(), &project, wt, &args.agent, prompt, &taken, &mut |_| {})?
         }
     };
-    if args.focus { session::focus(&mut client, &started)?; }
+    if args.focus { mux.focus(&started)?; }
     let mut result = Map::new();
     result.insert("workspace_id", Value::str(started.workspace_id));
     result.insert("tab_id", Value::str(started.tab_id));
@@ -345,10 +348,10 @@ fn send(args: &[String]) -> Result<(), String> {
     if parsed.preset.is_none() && parsed.prompt.is_none() {
         return Err("send needs --preset NAME or --prompt TEXT".into());
     }
-    let mut client = HerdrClient::from_env();
+    let mut mux = mux::from_env();
     let cwd = parsed.cwd.clone().or_else(|| source_cwd(&[])).ok_or("no working directory: use --cwd PATH")?;
-    let (project, worktrees) = project::load(&mut client, &cwd)?;
-    let agents = project::agents(&mut client);
+    let (project, worktrees) = project::load(mux.as_mut(), &cwd)?;
+    let agents = mux.agents();
     let by_worktree = project::agents_by_worktree(&worktrees, &agents);
     let index = by_worktree.iter().position(|here| here.iter().any(|a| a.name.as_deref() == Some(&target) || a.pane_id == target))
         .ok_or_else(|| format!("no running agent named {target} in this project"))?;
@@ -361,7 +364,7 @@ fn send(args: &[String]) -> Result<(), String> {
     let pr_url = info.as_ref().and_then(|info| info.pr.as_ref()).map(|pr| pr.url.as_str());
     let vars = session::prompt_vars(&project, wt, None, info.as_ref());
     let prompt = finish_prompt(&template, vars, &parsed.vars, Some(&wt.path), pr_url)?;
-    let deferred = session::send_to(&mut client, &target, &prompt)?;
+    let deferred = mux.send_to(&target, &prompt)?;
     let mut result = Map::new();
     result.insert("agent", Value::str(target));
     result.insert("deferred", Value::Bool(deferred));
@@ -411,10 +414,10 @@ fn parse_clean(args: &[String]) -> Result<CleanArgs, String> {
 /// each worktree it kept and why.
 fn clean(args: &[String]) -> Result<(), String> {
     let args = parse_clean(args)?;
-    let mut client = HerdrClient::from_env();
+    let mut mux = mux::from_env();
     let cwd = args.cwd.clone().or_else(|| source_cwd(&[])).ok_or("no working directory: use --cwd PATH")?;
-    let (project, worktrees) = project::load(&mut client, &cwd)?;
-    let agents = project::agents(&mut client);
+    let (project, worktrees) = project::load(mux.as_mut(), &cwd)?;
+    let agents = mux.agents();
     let by_worktree = project::agents_by_worktree(&worktrees, &agents);
     let gh = crate::pr::github_repo(&project.repo_root);
     let cached = gh.as_ref().ok().and_then(crate::pr::cached);
@@ -458,7 +461,7 @@ fn clean(args: &[String]) -> Result<(), String> {
         let outcome = match blocker {
             Some(reason) => Err(reason),
             None if args.dry_run => Ok(delete_branch),
-            None => session::remove_worktree(&mut client, &project, wt, delete_branch).map(|done| done.branch_deleted),
+            None => session::remove_worktree(mux.as_mut(), &project, wt, delete_branch).map(|done| done.branch_deleted),
         };
         match outcome {
             Ok(branch_deleted) => {
@@ -480,9 +483,8 @@ fn clean(args: &[String]) -> Result<(), String> {
 }
 
 /// `--list`: the rows, with PRs fetched (or cached) and agents joined.
-fn list(client: HerdrClient, config: Config, cwd: Option<String>) -> i32 {
-    let mut client = client;
-    let loaded = Loaded::load(&mut client, cwd.as_deref());
+fn list(mut mux: Box<dyn Mux>, config: Config, cwd: Option<String>) -> i32 {
+    let loaded = Loaded::load(mux.as_mut(), cwd.as_deref());
     let (project, worktrees) = match &loaded.result {
         Ok(found) => found.clone(),
         Err(error) => return fail(error),
@@ -563,17 +565,17 @@ pub fn main(args: Vec<String>) -> i32 {
         return open_picker();
     }
     if args.first().map(|a| a == "--send-prompt").unwrap_or(false) {
-        return session::send_prompt_main(&args[1..]);
+        return crate::herdr::send_prompt_main(&args[1..]);
     }
 
     let config = Config::load();
-    let client = HerdrClient::from_env();
+    let mux = mux::from_env();
     let cwd = source_cwd(&args);
     if has("--list") {
-        return list(client, config, cwd);
+        return list(mux, config, cwd);
     }
     if !isatty(0) || !isatty(1) {
-        return fail("needs a terminal; run it from Herdr with `plugin pane open`");
+        return fail("needs a terminal; run it from a Herdr plugin pane or a tmux popup");
     }
 
     // The project load (herdr + git) and the font check run while the
@@ -585,10 +587,10 @@ pub fn main(args: Vec<String>) -> i32 {
         icons::prefetch_nerd();
     }
     let (fetched, fetch) = std::sync::mpsc::channel();
-    let mut loader = client.clone();
+    let mut loader = mux.clone();
     let load_cwd = cwd.clone();
     std::thread::spawn(move || {
-        let loaded = Loaded::load(&mut loader, load_cwd.as_deref());
+        let loaded = Loaded::load(loader.as_mut(), load_cwd.as_deref());
         let _ = fetched.send(loaded);
     });
 
@@ -607,7 +609,7 @@ pub fn main(args: Vec<String>) -> i32 {
     let mouse = config.mouse;
     let loaded = fetch.recv().expect("the load thread panicked");
     // Never dropped: the process ends right after.
-    let mut picker = std::mem::ManuallyDrop::new(Picker::new(client, config, theme, loaded));
+    let mut picker = std::mem::ManuallyDrop::new(Picker::new(mux, config, theme, loaded));
 
     let outcome = loop {
         let outcome = {
@@ -626,15 +628,15 @@ pub fn main(args: Vec<String>) -> i32 {
         }
     };
 
-    // The terminal is restored: now move Herdr's focus.
+    // The terminal is restored: now move the multiplexer's focus.
     let result = match outcome {
         Outcome::Cancel => Ok(()),
         Outcome::Jump(index) => {
             let project = picker.project.clone().unwrap_or_default();
             let wt = picker.worktrees[index].clone();
-            session::jump(&mut picker.client, &project, &wt)
+            session::jump(picker.mux.as_mut(), &project, &wt)
         }
-        Outcome::Started(started) => session::focus(&mut picker.client, &started),
+        Outcome::Started(started) => picker.mux.focus(&started),
         Outcome::Edit { .. } => unreachable!("editor outcomes are handled before focusing"),
     };
     match result {

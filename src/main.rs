@@ -1,15 +1,17 @@
 //! hertrees: every git worktree of a project, its pull request, and agent
-//! sessions, in one Herdr popup.
+//! sessions, in one Herdr or tmux popup.
 
 mod app;
 mod cli;
 mod client;
 mod config;
 mod fuzzy;
+mod herdr;
 mod host;
 mod icons;
 mod keys;
 mod model;
+mod mux;
 mod opener;
 mod paint;
 mod par;
@@ -24,6 +26,7 @@ mod render;
 mod sequences;
 mod session;
 mod term;
+mod tmux;
 #[cfg(test)]
 mod testutil;
 mod textutil;

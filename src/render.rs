@@ -26,6 +26,8 @@ pub fn status_word(status: &str) -> &'static str {
         "working" => "working",
         "done" => "done",
         "idle" => "idle",
+        // tmux: alive, with no idle/working distinction.
+        "running" => "running",
         _ => "",
     }
 }

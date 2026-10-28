@@ -5,7 +5,8 @@
 Use this guide when operating the plugin, not changing its implementation. Start with
 `bin/hertrees --help` in the plugin checkout (or `hertrees --help` if it is on `PATH`).
 Examples below use `bin/hertrees` and an example repository at `/tmp/demo`; substitute
-real paths and installed agent kinds. Session commands require a running Herdr server.
+real paths and installed agent kinds. Session commands require a running Herdr server, or
+a tmux server when run inside tmux outside Herdr (see [Under tmux](#under-tmux)).
 
 For exact interfaces, inspect `src/cli.rs` (`list`, `print_presets`, `parse_start`,
 `start`, `send`, `clean`), `src/presets.rs` (files and names), and `src/config.rs` (lookup and keys).
@@ -247,6 +248,29 @@ Colors accept ANSI names, 0–255 palette indices, or `#RRGGBB`. For a minimal e
   "colors": { "pr_merged": "bright_green" }
 }
 ```
+
+## Under tmux
+
+Hertrees uses tmux when `$TMUX` is set and neither `HERDR_PLUGIN_ID` nor
+`HERDR_SOCKET_PATH` is; `HERTREES_MUX=tmux` or `herdr` overrides that. The commands and
+their JSON are the same, with these differences:
+
+- A space is a tmux window that Hertrees opened on the checkout (marked with the window
+  option `@hertrees_checkout`); a tab is a pane in it. `workspace_id` and `--list`'s
+  `workspace` are window ids (`@3`); `tab_id` and `pane_id` are both the pane id (`%7`).
+  New windows go into the caller's session.
+- `start --branch` runs `git worktree add -b BRANCH PATH [BASE]`; without `--base`, the
+  base is the main checkout's `HEAD`.
+- An agent's first prompt is passed on its command line, so `prompt_deferred` is always
+  `false` and a startup question (Claude's folder trust) does not lose it. `claude`,
+  `codex`, `cursor`, `pi`, `omp`, `opencode`, `gemini` and `copilot` take one; with any
+  other kind, a prompt is an error before anything is created, and a blank start works.
+- Agents have no state: `status` is `running` while the agent process lives (its pane's
+  `@hertrees_agent` option is set). A `running` agent blocks `clean` like a `working`
+  one does.
+- `send` pastes the prompt into the agent's pane (bracketed paste) and presses Enter at
+  once. `deferred: false` means it was typed, not that the agent accepted it; a busy
+  agent may queue or ignore it.
 
 ## Interface details
 
