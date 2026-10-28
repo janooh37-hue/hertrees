@@ -5,6 +5,10 @@
 - `^t` and `^x` offer `yazi` after `shell` when yazi is on `PATH`: a new tab, or a new
   worktree, whose shell runs the yazi file manager in the checkout; quitting yazi leaves
   the shell. `hertrees start --agent yazi` does the same.
+- Agent logos for Muse, Crush and Kimchi (Herdr Agent Icons Max 1.8.0). With a Nerd Font,
+  `shell` and `yazi` get a terminal and a folder mark, and agents the font has no logo
+  for get a robot, so every row of the agent picker lines up. The README's font links
+  now point at herdr-radar v1.5.0.
 
 ## 0.2.8 (2026-10-28)
 

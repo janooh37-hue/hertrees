@@ -2343,7 +2343,8 @@ impl Picker {
             YAZI => "a new tab browsing files in yazi",
             _ => "",
         };
-        let agent = if is_shell(kind) { None } else { Some(kind.to_string()) };
+        // `shell` and `yazi` name no agent; the kind only picks the mark drawn before them.
+        let agent = Some(kind.to_string());
         Item::new(kind.to_string(), detail.to_string(), String::new(), agent, meta, Vec::new())
     }
 

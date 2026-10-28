@@ -171,21 +171,26 @@ Everything is optional. Edit `~/.config/herdr/plugins/config/hertrees/config.jso
 - Presets: see [Presets](#presets). The preset manager opens `$VISUAL`, then `$EDITOR`,
   then `nvim` or `vi`.
 - Fonts and icons: everything is plain Unicode by default. For vendor logos before agent
-  rows, install the optional "Herdr Agent Icons Max" font from
-  [herdr-radar](https://github.com/hhdebb/herdr-radar) (not bundled here because its marks
-  are third-party trademarks):
-  [**download HerdrAgentIconsMax-Regular.ttf**](https://raw.githubusercontent.com/hhdebb/herdr-radar/main/dist/HerdrAgentIconsMax-Regular.ttf).
+  rows, install the optional "Herdr Agent Icons Max" font (1.8.0, with marks for Muse,
+  Crush and Kimchi) from [herdr-radar v1.5.0](https://github.com/hhdebb/herdr-radar/releases/tag/v1.5.0)
+  (not bundled here because its marks are third-party trademarks):
+  [**download HerdrAgentIconsMax-Regular.ttf**](https://raw.githubusercontent.com/hhdebb/herdr-radar/v1.5.0/dist/HerdrAgentIconsMax-Regular.ttf).
+  An older copy of the font draws Muse as a box; replace it with this one.
 
   ```bash
   # Linux
   mkdir -p ~/.local/share/fonts && curl -fLo ~/.local/share/fonts/HerdrAgentIconsMax-Regular.ttf \
-    https://raw.githubusercontent.com/hhdebb/herdr-radar/main/dist/HerdrAgentIconsMax-Regular.ttf && fc-cache -f
+    https://raw.githubusercontent.com/hhdebb/herdr-radar/v1.5.0/dist/HerdrAgentIconsMax-Regular.ttf && fc-cache -f
   # macOS
   curl -fLo ~/Library/Fonts/HerdrAgentIconsMax-Regular.ttf \
-    https://raw.githubusercontent.com/hhdebb/herdr-radar/main/dist/HerdrAgentIconsMax-Regular.ttf
+    https://raw.githubusercontent.com/hhdebb/herdr-radar/v1.5.0/dist/HerdrAgentIconsMax-Regular.ttf
   ```
 
-  Hertrees detects it in your user or system font folder. Set `"agent_icons": "font"` when
+  With a Nerd Font as well, the rows the font has no logo for get a Nerd Font mark
+  instead: a terminal for `shell`, a folder for `yazi`, and a robot for any other agent
+  (`droid`, `letta`, and kinds Herdr adds later).
+
+  Hertrees detects the logo font in your user or system font folder. Set `"agent_icons": "font"` when
   the font is only installed on the machine running your terminal. When Herdr runs on
   another machine (SSH, e.g. Termius on iOS), the font is detected on that server, so
   set `"agent_icons": "off"` if logos show as boxes.

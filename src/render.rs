@@ -281,7 +281,7 @@ pub fn render_row(theme: &Theme, item: &Item, row: &Row, width: isize, selected:
     let glyph_role = status_role(&item.status);
     let glyph = (!item.status.is_empty())
         .then(|| Segment::new(glyph_role, format!("{} ", crate::theme::status_glyph(&item.status))));
-    let logo = if theme.agent_icons { icons::logo_for(item.agent.as_deref()) } else { None };
+    let logo = if theme.agent_icons { icons::mark_for(item.agent.as_deref(), theme.tree_icons == Some(icons::NERD)) } else { None };
     let mut leading = vec![marker];
     if item.indent > 0 {
         leading.push(Segment::new("unknown", "  ".repeat(item.indent)));
