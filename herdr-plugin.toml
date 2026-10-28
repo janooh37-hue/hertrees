@@ -1,15 +1,15 @@
 id = "hertrees"
 name = "Hertrees"
-version = "0.2.6"
+version = "0.2.7"
 # Needs worktree.list/create/open, agent.start/wait/prompt and popup plugin panes.
 min_herdr_version = "0.9.3"
 description = "Every git worktree of a project with its PR state, and agent sessions, in one popup"
 platforms = ["linux", "macos", "windows"]
 
-# On install Herdr runs this in the plugin directory: it builds bin/hertrees
-# (and bin/hertrees.exe on Windows) from source with cargo (Rust 1.88+).
-# Windows also gets an extensionless bin/hertrees copy, so the pane command
-# below runs there as written.
+# On install Herdr runs this in the plugin directory: it downloads the release's
+# prebuilt bin/hertrees (bin/hertrees.exe on Windows), or builds it from source
+# with cargo (Rust 1.88+). Windows also gets an extensionless bin/hertrees copy,
+# so the pane command below runs there as written.
 [[build]]
 command = ["sh", "scripts/install.sh"]
 platforms = ["linux", "macos"]

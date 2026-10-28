@@ -1,12 +1,22 @@
 # Changelog
 
-## Unreleased
+## 0.2.7 (2026-10-28)
 
+- Install downloads a prebuilt binary (Linux, macOS and Windows; x86_64 and aarch64) from
+  the GitHub release, checked against its `SHA256SUMS`, instead of compiling; Rust is only
+  needed when no binary fits or the download fails. Every `v*` tag now publishes them.
 - Windows: the plugin builds and runs there. `scripts/install.ps1` is the Windows build
   step, and `hertrees.open-windows` is the action to bind. Agents are found on `PATH` by
   their `PATHEXT` extension (`claude.exe`, `omp.cmd`), PR links open in the default
   browser, the preset editor runs through `cmd` (`nvim`, else Notepad), and headless
   commands find Herdr's `%APPDATA%` and `%LOCALAPPDATA%` plugin directories.
+- The `icon` wordmark draws the 16 px icon in its own truecolor palette, pixel for pixel
+  (shaded cloak, cream eyes and flame, wood pole, three-tone leaf, earth), instead of a
+  simplified redraw in theme roles. The brand ink is left transparent.
+- The "not a git project" / "no worktrees" mark is the 32 px brand mark in its own
+  colours, pixel for pixel, instead of the block outline in four theme roles.
+- Removed the `pixel`, `pixel-small`, `sextant` and `off` wordmark styles; `^l` cycles
+  `search`, `braille`, `icon`. A config naming a removed style gets `search`.
 
 ## 0.2.6 (2026-10-25)
 

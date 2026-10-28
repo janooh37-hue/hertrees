@@ -22,8 +22,10 @@ or configure it, read [docs/agents.md](docs/agents.md). This file is for changin
   display widths and Python-compatible helpers originally derived from herdr-bar (MIT, LICENSE.herdr-bar).
 - `src/client.rs`, `src/host.rs`, `src/opener.rs`, `src/proc.rs`, `src/par.rs`:
   Herdr/OS/process integration; `src/testutil.rs`: test fixtures and environment isolation.
-- `scripts/install.sh`: release build and atomic replacement of `bin/hertrees`;
-  `scripts/install.ps1` is the Windows build step (`bin\hertrees.exe` plus an extensionless copy).
+- `scripts/install.sh`: Herdr's build step: downloads and verifies the release binary, or
+  builds from source; atomic replacement of `bin/hertrees`. `scripts/install.ps1` does the
+  same on Windows (`bin\hertrees.exe` plus an extensionless copy).
+- `.github/workflows/release.yml`: on a `v*` tag, builds the binaries and publishes the release.
 - `scripts/e2e.sh`: disposable live Herdr/Claude integration exercise.
 - `branding/`: public brand assets and usage guide; see `branding/README.md`. `branding/terminal/`
   is compiled in (`include_str!` in `render.rs`, `cli.rs`), so keep those paths.
@@ -41,9 +43,20 @@ sh scripts/install.sh   # Windows: powershell -NoProfile -ExecutionPolicy Bypass
 ```
 
 The first command builds `target/release/hertrees`; the install script also updates the
-binary used by the linked plugin. Unit tests live beside their implementation. Reuse
+binary used by the linked plugin. It builds from source whenever the checkout has
+uncommitted changes or HEAD is not the `v<version>` tag (`HERTREES_BUILD=source` forces it).
+Unit tests live beside their implementation. Reuse
 `testutil` for temporary directories and process-environment changes. Keep the bar-derived
 UI conventions and its attribution rather than introducing a second input/layout system.
+
+## Releasing
+
+Bump `version` in `Cargo.toml` and `herdr-plugin.toml` (then `cargo build` to refresh
+`Cargo.lock`), date the `CHANGELOG.md` section `## X.Y.Z (YYYY-MM-DD)`, merge to `main`,
+then tag and push `vX.Y.Z` on main. `release.yml` refuses a tag that disagrees with either
+version, builds `hertrees-{linux,macos}-{x86_64,aarch64}` and
+`hertrees-windows-{x86_64,aarch64}.exe` plus `SHA256SUMS`, and publishes the release with
+the changelog section as notes. Asset names are the downloaders' contract.
 
 ## Decisions and integration traps
 

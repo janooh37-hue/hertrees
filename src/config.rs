@@ -246,9 +246,8 @@ mod tests {
     #[test]
     fn wordmark_accepts_each_style_and_defaults_to_the_search_line() {
         let cases = [
-            ("search", Style::Search), ("pixel", Style::Pixel), ("pixel-small", Style::PixelSmall),
-            ("braille", Style::Braille), ("sextant", Style::Sextant), ("icon", Style::Icon), ("off", Style::Off),
-            (" Pixel ", Style::Pixel),
+            ("search", Style::Search), ("braille", Style::Braille), ("icon", Style::Icon),
+            (" Icon ", Style::Icon), ("pixel", Style::Search), ("off", Style::Search),
         ];
         for (name, style) in cases {
             assert_eq!(with(&format!(r#"{{"wordmark": "{}"}}"#, name)).wordmark, style, "{name}");
@@ -263,17 +262,17 @@ mod tests {
     fn store_sets_one_key_and_keeps_the_rest_in_order() {
         let tmp = crate::testutil::TempDir::new();
         let path = tmp.path().join("nested/config.json");
-        store_in(&path, "wordmark", Value::str("pixel")).unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\n  \"wordmark\": \"pixel\"\n}\n");
+        store_in(&path, "wordmark", Value::str("braille")).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\n  \"wordmark\": \"braille\"\n}\n");
         std::fs::write(&path, r##"{"scope": "open", "wordmark": "icon", "colors": {"accent": "#fff"}}"##).unwrap();
-        store_in(&path, "wordmark", Value::str("off")).unwrap();
+        store_in(&path, "wordmark", Value::str("search")).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         let config = with(&text);
-        assert_eq!((config.scope, config.wordmark), ("open", Style::Off));
+        assert_eq!((config.scope, config.wordmark), ("open", Style::Search));
         assert!(text.find("scope") < text.find("wordmark") && text.find("wordmark") < text.find("colors"), "{text}");
         for broken in ["{not json", "[1, 2]"] {
             std::fs::write(&path, broken).unwrap();
-            assert!(store_in(&path, "wordmark", Value::str("pixel")).is_err());
+            assert!(store_in(&path, "wordmark", Value::str("braille")).is_err());
             assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
         }
         assert_eq!(std::fs::read_dir(path.parent().unwrap()).unwrap().count(), 1, "no temporary file is left");
