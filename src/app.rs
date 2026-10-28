@@ -2335,17 +2335,8 @@ impl Picker {
         if self.config.default_agent.as_deref() == Some(kind) {
             meta.push(Meta::new("accent", "default"));
         }
-        let new = matches!(target, Target::New(_));
-        let detail = match kind {
-            SHELL if new => "no agent, just the worktree",
-            SHELL => "a new tab with no agent",
-            YAZI if new => "the worktree, browsing it in yazi",
-            YAZI => "a new tab browsing files in yazi",
-            _ => "",
-        };
         // `shell` and `yazi` name no agent; the kind only picks the mark drawn before them.
-        let agent = Some(kind.to_string());
-        Item::new(kind.to_string(), detail.to_string(), String::new(), agent, meta, Vec::new())
+        Item::new(kind.to_string(), String::new(), String::new(), Some(kind.to_string()), meta, Vec::new())
     }
 
     // -- preview ----------------------------------------------------------------
@@ -3520,7 +3511,6 @@ mod tests {
         key(&mut picker, "ctrl+t");
         let Mode::Agent { target: Target::Existing(1), kinds, .. } = &picker.mode else { panic!("no agent picker") };
         assert_eq!(kinds.last().map(String::as_str), Some(SHELL), "no yazi on PATH, none offered");
-        assert!(plain(&mut picker, 120, 20).join("\n").contains("a new tab with no agent"));
         key(&mut picker, "esc");
         let yazi = tmp.path().join("bin").join(format!("yazi{}", std::env::consts::EXE_SUFFIX));
         std::fs::write(&yazi, "#!/bin/sh\nexit 0\n").unwrap();

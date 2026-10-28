@@ -197,20 +197,22 @@ pub fn logo_for(agent: Option<&str>) -> Option<char> {
     VENDORS.iter().position(|v| *v == kind).map(logo)
 }
 
-/// Nerd Font robot, for agents the logo font has no mark for.
+/// Nerd Font: terminal, duck (yazi's mascot), robot.
+const NERD_SHELL: char = '\u{f489}';
+const NERD_YAZI: char = '\u{f01e5}';
 const NERD_AGENT: char = '\u{f06a9}';
-/// yazi's duck, as the colour emoji: two columns wide, and needs no Nerd Font.
-const YAZI_DUCK: char = '\u{1f986}';
 
 /// The mark before an agent picker or agent row: the vendor logo when the
-/// font has one, the duck for `yazi`, else (with a Nerd Font) a robot, so new
-/// kinds line up with the rest. `shell` gets none.
+/// font has one, else (with a Nerd Font) a terminal for `shell`, a duck for
+/// `yazi` and a robot for any other agent, so new kinds line up with the rest.
 pub fn mark_for(agent: Option<&str>, nerd: bool) -> Option<char> {
     let agent = agent.filter(|a| !a.trim().is_empty())?;
-    logo_for(Some(agent)).or_else(|| match agent_kind(agent).as_str() {
-        "shell" => None,
-        "yazi" => Some(YAZI_DUCK),
-        _ => nerd.then_some(NERD_AGENT),
+    logo_for(Some(agent)).or_else(|| {
+        nerd.then(|| match agent_kind(agent).as_str() {
+            "shell" => NERD_SHELL,
+            "yazi" => NERD_YAZI,
+            _ => NERD_AGENT,
+        })
     })
 }
 
@@ -263,12 +265,15 @@ mod tests {
     }
 
     #[test]
-    fn marks_fill_in_where_the_font_has_no_logo() {
+    fn nerd_marks_fill_in_where_the_font_has_no_logo() {
         assert_eq!(mark_for(Some("claude"), true), logo_for(Some("claude")), "a vendor logo wins");
-        assert_eq!(mark_for(Some("shell"), true), None);
-        assert_eq!(mark_for(Some("yazi"), false), Some(YAZI_DUCK), "the duck needs no Nerd Font");
+        assert_eq!(mark_for(Some("shell"), true), Some(NERD_SHELL));
+        assert_eq!(mark_for(Some("yazi"), true), Some(NERD_YAZI));
         assert_eq!(mark_for(Some("droid"), true), Some(NERD_AGENT), "kinds without a logo get the robot");
-        assert_eq!(mark_for(Some("droid"), false), None, "no Nerd Font, no robot");
+        assert_eq!(mark_for(Some("yazi"), false), None, "no Nerd Font, no fallback");
         assert_eq!(mark_for(None, true), None);
+        for mark in [NERD_SHELL, NERD_YAZI, NERD_AGENT] {
+            assert_eq!(crate::textutil::display_width(&mark.to_string()), 1, "{mark:?}");
+        }
     }
 }

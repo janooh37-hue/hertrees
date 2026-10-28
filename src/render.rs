@@ -239,6 +239,7 @@ pub fn agent_role(agent: Option<&str>) -> &'static str {
         "gemini" => "agent_gemini",
         "cursor" | "cursor-agent" => "agent_cursor",
         "opencode" | "open-code" => "agent_opencode",
+        "yazi" => "agent_yazi",
         _ => "muted",
     }
 }
