@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- `^t` and `^x` offer `yazi` after `shell` when yazi is on `PATH`: a new tab, or a new
+  worktree, whose shell runs the yazi file manager in the checkout; quitting yazi leaves
+  the shell. `hertrees start --agent yazi` does the same.
+
 ## 0.2.8 (2026-10-28)
 
 - tmux (beta): outside Herdr, Hertrees drives tmux (3.2+). `hertrees --open` opens the picker in

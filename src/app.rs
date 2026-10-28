@@ -15,7 +15,7 @@ use crate::project;
 use crate::pyjson;
 use crate::pystr;
 use crate::render::{self, compute_layout, scrollbar_column, Item, Layout, Meta, Row, Segment};
-use crate::session::{self, PromptVars};
+use crate::session::{self, is_shell, shell_command, PromptVars, SHELL, YAZI};
 use crate::term::Terminal;
 use crate::textutil::{display_width, pad, sanitize, truncate};
 use crate::theme::Theme;
@@ -32,8 +32,6 @@ pub const ERROR_TTL: f64 = 8.0;
 const FACT_WORKERS: usize = 4;
 /// Files the preview's diff lists before "… N more".
 const DIFF_FILES: usize = 8;
-/// Pseudo agent kind: a new worktree with only a shell.
-const SHELL: &str = "shell";
 
 pub const PLACEHOLDER: &str = "search worktrees, branches, PRs…    @ agents   ⇥ PR state";
 pub const PLACEHOLDER_SHORT: &str = "search worktrees, branches, PRs…";
@@ -1363,6 +1361,9 @@ impl Picker {
             }
         }
         kinds.push(SHELL.to_string());
+        if crate::opener::on_path(YAZI) {
+            kinds.push(YAZI.to_string());
+        }
         let rows = (0..kinds.len()).collect();
         self.mode = Mode::Agent { target, edit: LineEdit::default(), kinds, rows, selected: 0, preset: 0 };
         self.dirty = true;
@@ -1669,7 +1670,7 @@ impl Picker {
                 let target = target.clone();
                 let chosen = *preset;
                 let template = self.presets[chosen].prompt.clone();
-                if kind == SHELL {
+                if is_shell(&kind) {
                     self.launch(target, kind, String::new(), String::new(), Vec::new());
                     return None;
                 }
@@ -1873,11 +1874,13 @@ impl Picker {
             };
             let prompt = if prompt.is_empty() { None } else { Some(prompt.as_str()) };
             let result = match (&target, worktree) {
-                (Target::New(branch), _) if kind == SHELL => session::create_shell(mux.as_mut(), &project, branch, base.as_deref(), label.as_deref()),
+                (Target::New(branch), _) if is_shell(&kind) => session::create_shell(mux.as_mut(), &project, branch, base.as_deref(), label.as_deref())
+                    .and_then(|started| shell_command(mux.as_mut(), &kind, started)),
                 (Target::New(branch), _) => {
                     session::start_new(mux.as_mut(), &project, branch, base.as_deref(), label.as_deref(), &kind, prompt, &taken, &mut progress)
                 }
-                (Target::Existing(_), Some(wt)) if kind == SHELL => session::open_tab(mux.as_mut(), &project, &wt, &mut progress),
+                (Target::Existing(_), Some(wt)) if is_shell(&kind) => session::open_tab(mux.as_mut(), &project, &wt, &mut progress)
+                    .and_then(|started| shell_command(mux.as_mut(), &kind, started)),
                 (Target::Existing(_), Some(wt)) => {
                     session::start_existing(mux.as_mut(), &project, &wt, &kind, prompt, &taken, &mut progress)
                 }
@@ -2332,8 +2335,15 @@ impl Picker {
         if self.config.default_agent.as_deref() == Some(kind) {
             meta.push(Meta::new("accent", "default"));
         }
-        let shell = if matches!(target, Target::New(_)) { "no agent, just the worktree" } else { "a new tab with no agent" };
-        let (agent, detail) = if kind == SHELL { (None, shell) } else { (Some(kind.to_string()), "") };
+        let new = matches!(target, Target::New(_));
+        let detail = match kind {
+            SHELL if new => "no agent, just the worktree",
+            SHELL => "a new tab with no agent",
+            YAZI if new => "the worktree, browsing it in yazi",
+            YAZI => "a new tab browsing files in yazi",
+            _ => "",
+        };
+        let agent = if is_shell(kind) { None } else { Some(kind.to_string()) };
         Item::new(kind.to_string(), detail.to_string(), String::new(), agent, meta, Vec::new())
     }
 
@@ -2420,8 +2430,13 @@ impl Picker {
             }
         };
         body.push(Vec::new());
-        if kind == SHELL {
-            let what = if matches!(target, Target::New(_)) { "creates the worktree and focuses its shell" } else { "opens a tab with a shell and focuses it" };
+        if is_shell(kind) {
+            let what = match (kind, matches!(target, Target::New(_))) {
+                (YAZI, true) => "creates the worktree and opens yazi in its shell",
+                (YAZI, false) => "opens a tab running yazi and focuses it; q leaves a shell",
+                (_, true) => "creates the worktree and focuses its shell",
+                (_, false) => "opens a tab with a shell and focuses it",
+            };
             body.push(vec![Segment::new("muted", what)]);
         } else {
             body.push(vec![Segment::new("muted", "preset  "), Segment::bold("accent", preset, true)]);
@@ -3503,8 +3518,19 @@ mod tests {
         picker.selected = 2;
         key(&mut picker, "ctrl+t");
         let Mode::Agent { target: Target::Existing(1), kinds, .. } = &picker.mode else { panic!("no agent picker") };
-        assert_eq!(kinds.last().map(String::as_str), Some(SHELL));
+        assert_eq!(kinds.last().map(String::as_str), Some(SHELL), "no yazi on PATH, none offered");
         assert!(plain(&mut picker, 120, 20).join("\n").contains("a new tab with no agent"));
+        key(&mut picker, "esc");
+        let yazi = tmp.path().join("bin").join(format!("yazi{}", std::env::consts::EXE_SUFFIX));
+        std::fs::write(&yazi, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&yazi, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        key(&mut picker, "ctrl+t");
+        let Mode::Agent { kinds, .. } = &picker.mode else { panic!("no agent picker") };
+        assert_eq!(kinds[kinds.len() - 2..], [SHELL.to_string(), YAZI.to_string()]);
     }
 
     #[test]

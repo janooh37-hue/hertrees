@@ -86,7 +86,9 @@ otherwise below it after a blank line. The result expands the
 [placeholders](#placeholders); a placeholder the prompt defines itself (`{ticket}`)
 needs `--var ticket=VALUE`, and a missing one is an error naming each `--var` required. `--agent shell` opens a tab (with `--path`) or a new
 worktree (with `--branch`) with no agent; leave prompt options off because a shell has
-no agent to receive them. `--label NAME` names a new worktree's space (default: the
+no agent to receive them. `--agent yazi` does the same and starts the
+[yazi](https://yazi-rs.github.io) file manager in that shell (an error when `yazi` is not
+on `PATH`); quitting yazi leaves the shell. `--label NAME` names a new worktree's space (default: the
 branch) and is valid only with `--branch`. Focus remains
 unchanged unless `--focus` is supplied.
 
