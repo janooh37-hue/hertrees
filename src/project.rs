@@ -1,7 +1,7 @@
 //! Discover a project's checkouts and associate local Git and agent state.
 
-use crate::client::{self, HerdrClient};
-use crate::model::{AgentHere, BaseDiff, GitFacts, Project, Space, Tab, Worktree};
+use crate::model::{AgentHere, BaseDiff, GitFacts, Project, Space, Worktree};
+use crate::mux::Mux;
 use crate::pyjson::{self, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -66,33 +66,14 @@ pub fn ignore_worktrees(repo_root: &str) -> Result<(), String> {
     file.write_all(entry).map_err(|e| format!("Cannot ignore local worktrees: {e}"))
 }
 
-/// Discover through Herdr so linked checkouts resolve to their main repository.
-pub fn load(client: &mut HerdrClient, cwd: &str) -> Result<(Project, Vec<Worktree>), String> {
-    let result = client
-        .call("worktree.list", client::dict(&[("cwd", Value::str(cwd))]), &["worktree", "list", "--cwd", cwd])
-        .map_err(|error| {
-            let message = error.message.trim();
-            if message.is_empty() { "herdr unreachable".to_owned() } else { message.to_owned() }
-        })?;
-    let source = result.get("source").ok_or("not a git project")?;
-    let repo_root = text(source.get("repo_root")).ok_or("not a git project")?;
-    let mut worktrees = Vec::new();
-    for row in result.get("worktrees").map(Value::list_or_empty).unwrap_or_default() {
-        let Some(path) = text(row.get("path")) else { continue };
-        let bare = row.get("is_bare").truthy();
-        let detached = row.get("is_detached").truthy();
-        worktrees.push(Worktree {
-            path: path.to_owned(),
-            branch: if bare || detached { None } else {
-                text(row.get("branch")).map(|branch| branch.strip_prefix("refs/heads/").unwrap_or(branch).to_owned())
-            },
-            detached,
-            bare,
-            prunable: row.get("is_prunable").truthy(),
-            is_main: Path::new(path) == Path::new(repo_root),
-            open_workspace_id: text(row.get("open_workspace_id")).map(str::to_owned),
-            ..Worktree::default()
-        });
+/// Discover through the multiplexer so linked checkouts resolve to their main
+/// repository, then add what git knows about each branch.
+pub fn load(mux: &mut dyn Mux, cwd: &str) -> Result<(Project, Vec<Worktree>), String> {
+    let listing = mux.worktrees(cwd)?;
+    let repo_root = listing.repo_root.as_str();
+    let mut worktrees = listing.worktrees;
+    for worktree in &mut worktrees {
+        worktree.is_main = Path::new(&worktree.path) == Path::new(repo_root);
     }
     if worktrees.is_empty() {
         return Err("not a git project".to_owned());
@@ -120,7 +101,7 @@ pub fn load(client: &mut HerdrClient, cwd: &str) -> Result<(Project, Vec<Worktre
     }
 
     // One extra process for all detached rows, including paths with newlines.
-    if worktrees.iter().any(|worktree| worktree.detached) {
+    if worktrees.iter().any(|worktree| worktree.detached && worktree.head.is_empty()) {
         if let Some(output) = git(repo_root, &["worktree", "list", "--porcelain", "-z"]) {
             let output = String::from_utf8_lossy(&output);
             let mut path = None;
@@ -156,63 +137,16 @@ pub fn load(client: &mut HerdrClient, cwd: &str) -> Result<(Project, Vec<Worktre
         canonical_cwd.starts_with(&root).then(|| (worktree, root.components().count()))
     }).max_by_key(|&(_, depth)| depth)
         .map(|(worktree, _)| worktree.path.as_str())
-        .unwrap_or_else(|| text(source.get("source_checkout_path")).unwrap_or(cwd))
+        .unwrap_or_else(|| listing.source_checkout.as_deref().unwrap_or(cwd))
         .to_owned();
     Ok((Project {
         repo_root: repo_root.to_owned(),
-        repo_name: text(source.get("repo_name")).unwrap_or_else(|| {
-            Path::new(repo_root).file_name().and_then(|name| name.to_str()).unwrap_or(repo_root)
-        }).to_owned(),
+        repo_name: listing.repo_name.clone().unwrap_or_else(|| {
+            Path::new(repo_root).file_name().and_then(|name| name.to_str()).unwrap_or(repo_root).to_owned()
+        }),
         source_checkout,
         default_branch,
     }, worktrees))
-}
-
-/// Agent discovery is best-effort; an unavailable server is an empty list.
-pub fn agents(client: &mut HerdrClient) -> Vec<AgentHere> {
-    let Ok(result) = client.call("agent.list", client::dict(&[]), &["agent", "list"]) else { return Vec::new() };
-    result.get("agents").map(Value::list_or_empty).unwrap_or_default().iter().map(|row| {
-        let status = match row.get("agent_status").as_str().unwrap_or("") {
-            "blocked" => "blocked",
-            "working" => "working",
-            "done" => "done",
-            "idle" => "idle",
-            _ => "unknown",
-        };
-        AgentHere {
-            name: text(row.get("name")).map(str::to_owned),
-            kind: text(row.get("agent")).unwrap_or("unknown").to_owned(),
-            status: status.to_owned(),
-            cwd: text(row.get("foreground_cwd")).or_else(|| text(row.get("cwd"))).unwrap_or("").to_owned(),
-            pane_id: text(row.get("pane_id")).unwrap_or("").to_owned(),
-            tab_id: text(row.get("tab_id")).unwrap_or("").to_owned(),
-        }
-    }).collect()
-}
-
-/// Every open workspace that shows a checkout, with its tabs; None when the
-/// server could not be asked, so callers keep what they knew.
-pub fn spaces(client: &mut HerdrClient) -> Option<Vec<Space>> {
-    let workspaces = client.call("workspace.list", client::dict(&[]), &["workspace", "list"]).ok()?;
-    let tabs = client.call("tab.list", client::dict(&[]), &["tab", "list"]).ok();
-    let tabs = tabs.as_ref().and_then(|result| result.get("tabs")).map(Value::list_or_empty).unwrap_or_default();
-    Some(workspaces.get("workspaces").map(Value::list_or_empty).unwrap_or_default().iter().filter_map(|row| {
-        let id = text(row.get("workspace_id"))?;
-        let checkout = text(row.get("worktree").get("checkout_path"))?;
-        Some(Space {
-            id: id.to_owned(),
-            label: text(row.get("label")).unwrap_or(id).to_owned(),
-            checkout: checkout.to_owned(),
-            tabs: tabs.iter().filter(|tab| tab.get("workspace_id").as_str() == Some(id)).filter_map(|tab| {
-                let tab_id = text(tab.get("tab_id"))?;
-                Some(Tab {
-                    id: tab_id.to_owned(),
-                    label: text(tab.get("label")).unwrap_or(tab_id).to_owned(),
-                    focused: tab.get("focused").truthy(),
-                })
-            }).collect(),
-        })
-    }).collect())
 }
 
 /// Each worktree's space: the workspace herdr reported for it at load, else

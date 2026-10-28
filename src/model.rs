@@ -26,7 +26,7 @@ pub struct Worktree {
     pub prunable: bool,
     /// The repository's main checkout (first row of `git worktree list`).
     pub is_main: bool,
-    /// Herdr workspace already showing this checkout.
+    /// Space (Herdr workspace, tmux window) already showing this checkout.
     pub open_workspace_id: Option<String>,
     /// Upstream of `branch`: remote name and branch on that remote
     /// (`origin`, `feat/ledger-book-polish`). None without tracking config.
@@ -51,7 +51,7 @@ pub struct AgentHere {
     pub name: Option<String>,
     /// Agent kind as herdr reports it (`claude`, `omp`, ...).
     pub kind: String,
-    /// herdr status: blocked | working | done | idle | unknown.
+    /// herdr status: blocked | working | done | idle | unknown; tmux: running.
     pub status: String,
     pub cwd: String,
     pub pane_id: String,
@@ -59,8 +59,8 @@ pub struct AgentHere {
     pub tab_id: String,
 }
 
-/// The Herdr workspace showing a worktree: one per checkout, named by the user
-/// or after the branch.
+/// The space showing a worktree (a Herdr workspace, a tmux window): one per
+/// checkout, named by the user or after the branch.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Space {
     pub id: String,

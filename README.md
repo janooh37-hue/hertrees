@@ -9,7 +9,7 @@
 
 A [Herdr](https://herdr.dev) plugin that lists every git worktree of your project in one
 popup, with its pull request state and running agents, and starts a new agent session in
-any of them or in a brand-new worktree.
+any of them or in a brand-new worktree. It also runs under plain [tmux](#tmux-beta) (beta).
 
 <p align="center"><img src="docs/media/demo.gif" alt="Hertrees popup: cycle scopes with Tab, press ^x for a new worktree, pick from 24 supported agents, choose a preset or write and save a custom prompt" width="860"></p>
 
@@ -54,6 +54,38 @@ aarch64) from the GitHub release; without one it builds from source, which needs
    the `open` one runs through `sh`.
 
 3. Press `prefix+w` in any pane of a git project.
+
+## tmux (beta)
+
+tmux support is in beta. Outside Herdr, Hertrees drives tmux 3.2+ instead (Linux and macOS). Get the binary with
+`sh scripts/install.sh` in a clone (or `cargo build --release`), then bind a key in
+`~/.tmux.conf`:
+
+```tmux
+bind-key w run-shell '/path/to/hertrees/bin/hertrees --open'
+```
+
+`prefix w` opens the popup on the project of the focused pane. Each worktree gets a tmux
+window in the current session, named after its branch (or the name you give it); a new
+tab is a new pane in that window. `⏎` selects the window, switching session if needed;
+windows Hertrees did not open are left alone. What tmux lacks compared with Herdr:
+
+- No plugin install or Herdr action: you place the binary and bind the key yourself.
+  Linux and macOS only; there is no tmux support on Windows.
+- tmux reports no agent states: no `◉` needs you, `◐` working, `●` done or `✓` idle.
+  Agents show as `running` until they exit, and a running
+  agent always blocks cleaning up its worktree.
+- The first prompt is passed on the agent's command line, so it arrives even behind a
+  startup question (Claude's folder trust). Agents that take one: `claude`, `codex`,
+  `cursor`, `pi`, `omp`, `opencode`, `gemini`, `copilot`; the others start blank.
+- `^s` pastes the prompt into the agent's pane and presses Enter at once, whether or not
+  the agent is busy.
+  Herdr waits until the agent can take input; tmux has no such readiness gate.
+- No grouped spaces: worktrees are flat windows in the current session rather than
+  spaces grouped under the main checkout, and there is no live end-to-end test yet.
+
+Hertrees uses Herdr whenever it runs in a Herdr pane or popup. When tmux and Herdr are
+nested, set `HERTREES_MUX=tmux` (or `herdr`) to choose.
 
 ## Keys
 

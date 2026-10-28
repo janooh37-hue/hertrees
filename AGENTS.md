@@ -7,11 +7,14 @@ or configure it, read [docs/agents.md](docs/agents.md). This file is for changin
 
 - `src/main.rs`, `src/cli.rs`: entry point, headless commands, terminal/editor lifecycle.
 - `src/app.rs`, `src/model.rs`: picker modes, input, state, worktree/PR/agent models.
-- `src/project.rs`: focused-pane context, repository discovery, worktrees, local Git facts,
-  and joining agents to checkouts.
+- `src/project.rs`: focused-pane context, repository discovery (through the backend's
+  listing), local Git facts, and joining agents to checkouts.
 - `src/pr.rs`: GitHub lookup, branch matching, PR classification and disk cache.
-- `src/session.rs`: worktree open/create, fresh sessions, readiness, deferred prompt delivery,
-  placeholders (`compose`, `fields`, `fill_lazy`) and prompting running agents (`send_to`).
+- `src/mux.rs`: the `Mux` trait both backends implement, `Started`, and backend choice
+  (`HERTREES_MUX`, Herdr env, `$TMUX`). `src/herdr.rs`: the Herdr backend, its readiness
+  gate and deferred prompt sender. `src/tmux.rs`: the tmux backend.
+- `src/session.rs`: shared session flow over `dyn Mux` (open/create, launch naming,
+  cleanup rules), placeholders (`compose`, `fields`, `fill_lazy`).
 - `src/presets.rs`: prompt files and their settings block, repository presets, initial seeding,
   name validation, prompt-editor history and editor invocation.
 - `src/config.rs`: configuration lookup and defaults.
@@ -68,7 +71,7 @@ the changelog section as notes. Asset names are the downloaders' contract.
   only when that upstream is not the default branch.
 - Restore the terminal before moving Herdr focus or invoking an editor. Keep the editor
   return/re-entry loop in `cli.rs`.
-- `agent.start` returning is not proof of input readiness. Preserve the `session.rs`
+- `agent.start` returning is not proof of input readiness. Preserve the `herdr.rs`
   gate: idle/done, no launch pending, and `interactive_ready` not false; submit through
   `agent.prompt` waiting for working. Startup “blocked during startup” / “not ready”
   errors are non-fatal; blocked/slow startup uses the detached prompt sender. Treat the
@@ -86,6 +89,13 @@ the changelog section as notes. Asset names are the downloaders' contract.
   with no space goes through `git worktree remove`. Never pass `force`. Delete the branch
   only when the merged PR's `headRefOid` equals the local head. Herdr will not close a
   main checkout's space while linked worktree spaces are grouped under it.
+- tmux parses its own command line: an argument ending in `;` ends the command unless
+  `\;` (`tmux::literal`), and `-c`, `-n` and `rename-window` expand `#` formats
+  (`tmux::format_literal`). Prompts never go through tmux's arguments: the pane runner
+  reads them from a private file, and `send_to` uses `load-buffer` from one.
+- tmux agent marks (`@hertrees_agent`, `@hertrees_kind`) are set on the shell pane before
+  `respawn-pane -k` (pane options survive it), and the runner drops them when the agent
+  exits. Windows without `@hertrees_checkout` are never treated as spaces.
 - Use disposable repositories for mutating tests; never run them against a real project.
 
 ## Live verification
@@ -106,3 +116,11 @@ and prints identifiers and cleanup instructions. `E2E_PRESET` selects the defaul
 `E2E_TIMEOUT` is seconds per wait (default 90). Run `bash scripts/e2e.sh --help` for the
 current options. This script does not cover every preset-manager/editor interaction;
 exercise those separately when changing them.
+
+There is no tmux e2e script. Exercise tmux in a disposable server started from an
+environment without `TMUX`/`TMUX_PANE` (a server inherits them into its global
+environment, which then misleads `display-popup` jobs): `env -u TMUX -u TMUX_PANE tmux
+-L NAME -f /dev/null new-session -d …`, then run `hertrees` with `TMUX` pointing at that
+server. To see the popup, attach a client inside a second disposable server and read it
+with `capture-pane`. A fake agent script first on `PATH` (it records its arguments)
+checks prompt passing deterministically.

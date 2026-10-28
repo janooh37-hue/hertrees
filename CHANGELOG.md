@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.8 (2026-10-28)
+
+- tmux (beta): outside Herdr, Hertrees drives tmux (3.2+). `hertrees --open` opens the picker in
+  a `display-popup` (bind it with `run-shell`); each worktree gets a window in the
+  current session and a new tab is a pane in it. Agents get their first prompt on their
+  command line (`claude`, `codex`, `cursor`, `pi`, `omp`, `opencode`, `gemini`,
+  `copilot`), show as `running` while they run, and block cleanup until they exit; `^s`
+  and `hertrees send` paste the prompt and press Enter. All headless commands work the
+  same. `HERTREES_MUX=herdr|tmux` chooses when both are present.
+- tmux is beta and lacks, compared with Herdr: plugin install and Windows support, agent
+  states (agents only show `running`), a readiness gate before sending prompts, a first
+  prompt for agents outside that list, spaces grouped under the main checkout, and a
+  live end-to-end test.
+
 ## 0.2.7 (2026-10-28)
 
 - Install downloads a prebuilt binary (Linux, macOS and Windows; x86_64 and aarch64) from
