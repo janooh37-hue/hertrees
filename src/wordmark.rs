@@ -1,17 +1,20 @@
 //! The configurable wordmark (`"wordmark"` in config.json).
 //!
 //! `search` puts the two-tone name on the search line (see
-//! `render::render_search`); the pixel styles draw the brand lettering in the
+//! `render::render_search`); the art styles draw the brand lettering or icon in the
 //! popup's first rows, above a plain search line. The art below was generated
 //! once from the brand grids (`branding/logo/wordmark/wordmark.svg`, the
 //! icon's 16 px PNG and the compact 6 px / 4 px redrawings of the same letters)
 //! and is kept as glyph rows, so nothing is parsed at run time.
 //!
-//! Each art row is `(glyphs, foreground roles, background roles)`, one role
-//! letter per cell: `a` accent (the prompt's ❯ and the cloak), `h` text
-//! ("her"), `t` idle (the leaf: "trees", the tree), `w` working (lantern
-//! amber), `m` muted, `u` unknown, space for none. An empty background string
-//! means no cell has one. Roles come from the theme, so colour overrides apply.
+//! Each art row is `(glyphs, foreground codes, background codes)`, one code
+//! per cell. Lower-case codes are theme roles: `a` accent (the prompt's ❯),
+//! `h` text ("her"), `t` idle (the leaf: "trees"), `w` working, `m` muted,
+//! `u` unknown; they follow colour overrides. Upper-case codes are the
+//! icon's own truecolor palette (`BRAND`), so the icon matches its PNG pixel
+//! for pixel. Space is none; an empty background string means no cell has one.
+
+use std::borrow::Cow;
 
 use crate::render::{segments_to_text, Segment};
 use crate::textutil::{display_width, pad, truncate};
@@ -23,28 +26,16 @@ pub type Art = &'static [(&'static str, &'static str, &'static str)];
 pub enum Style {
     /// `❯ hertrees │ search…` on the search line (the default).
     Search,
-    /// 3-row half-block lettering.
-    Pixel,
-    /// 2-row half-block lettering.
-    PixelSmall,
     /// The full 36×7 brand grid in 2 rows of braille.
     Braille,
-    /// 2-row sextants (Unicode 13 block mosaics).
-    Sextant,
     /// The 16×16 icon beside the name, tagline and counts.
     Icon,
-    /// No name at all: a plain `❯ search…`.
-    Off,
 }
 
 pub const NAMES: &[(&str, Style)] = &[
     ("search", Style::Search),
-    ("pixel", Style::Pixel),
-    ("pixel-small", Style::PixelSmall),
     ("braille", Style::Braille),
-    ("sextant", Style::Sextant),
     ("icon", Style::Icon),
-    ("off", Style::Off),
 ];
 
 /// Rows the list keeps below a pixel wordmark; with fewer, the popup falls
@@ -74,12 +65,9 @@ impl Style {
 
     fn art(self) -> Option<Art> {
         Some(match self {
-            Style::Pixel => PIXEL,
-            Style::PixelSmall => PIXEL_SMALL,
             Style::Braille => BRAILLE,
-            Style::Sextant => SEXTANT,
             Style::Icon => ICON,
-            Style::Search | Style::Off => return None,
+            Style::Search => return None,
         })
     }
 
@@ -132,8 +120,41 @@ fn role(code: char) -> &'static str {
     }
 }
 
+/// The brand palette (`branding/logo/icon/icon-16.png`, `logo/mark/mark.svg`): code,
+/// foreground, background. The brand ink is left out so the terminal's own
+/// background shows through, as it does around the icon on the ink ground.
+const BRAND: &[(char, &str, &str)] = &[
+    ('A', "\x1b[38;2;232;181;74m", "\x1b[48;2;232;181;74m"), // lantern amber, sash
+    ('C', "\x1b[38;2;247;231;166m", "\x1b[48;2;247;231;166m"), // cream: eyes, flame
+    ('D', "\x1b[38;2;58;74;166m", "\x1b[48;2;58;74;166m"), // cloak shade
+    ('B', "\x1b[38;2;91;141;239m", "\x1b[48;2;91;141;239m"), // cloak blue
+    ('L', "\x1b[38;2;152;168;244m", "\x1b[48;2;152;168;244m"), // cloak light
+    ('O', "\x1b[38;2;176;114;58m", "\x1b[48;2;176;114;58m"), // wood
+    ('Y', "\x1b[38;2;180;214;94m", "\x1b[48;2;180;214;94m"), // leaf light
+    ('G', "\x1b[38;2;95;183;96m", "\x1b[48;2;95;183;96m"), // leaf
+    ('F', "\x1b[38;2;47;125;74m", "\x1b[48;2;47;125;74m"), // leaf shade
+    ('R', "\x1b[38;2;106;74;76m", "\x1b[48;2;106;74;76m"), // bark, boots, earth
+    ('P', "\x1b[38;2;51;48;74m", "\x1b[48;2;51;48;74m"), // dark earth
+    ('T', "\x1b[38;2;43;102;112m", "\x1b[48;2;43;102;112m"), // canopy teal (mark only)
+    ('V', "\x1b[38;2;185;121;230m", "\x1b[48;2;185;121;230m"), // blossom (mark only)
+];
+
+fn brand(code: char) -> Option<(&'static str, &'static str)> {
+    BRAND.iter().find(|(known, _, _)| *known == code).map(|&(_, fg, bg)| (fg, bg))
+}
+
+/// The escape for one cell code; empty for none.
+fn colour(theme: &Theme, code: char, background: bool) -> Cow<'_, str> {
+    match (brand(code), background) {
+        (Some((fg, _)), false) => Cow::Borrowed(fg),
+        (Some((_, bg)), true) => Cow::Borrowed(bg),
+        (None, false) => Cow::Borrowed(theme.fg(role(code))),
+        (None, true) => Cow::Owned(theme.bg(role(code))),
+    }
+}
+
 /// One art row as escape sequences, runs of equal colours sharing a code.
-fn paint_art_row(theme: &Theme, (glyphs, fg, bg): (&str, &str, &str)) -> String {
+pub fn paint_art_row(theme: &Theme, (glyphs, fg, bg): (&str, &str, &str)) -> String {
     let mut out = String::new();
     let mut fgs = fg.chars();
     let mut bgs = bg.chars();
@@ -144,8 +165,8 @@ fn paint_art_row(theme: &Theme, (glyphs, fg, bg): (&str, &str, &str)) -> String 
             if run.is_some_and(|(f, b)| f != ' ' || b != ' ') {
                 out.push_str(RESET);
             }
-            out.push_str(theme.fg(role(key.0)));
-            out.push_str(&theme.bg(role(key.1)));
+            out.push_str(&colour(theme, key.0, false));
+            out.push_str(&colour(theme, key.1, true));
             run = Some(key);
         }
         out.push(glyph);
@@ -166,7 +187,7 @@ pub fn name_segments() -> Vec<Segment> {
 }
 
 /// The rows a resolved style draws above the search line, each padded to
-/// `width`; empty for `Search` and `Off`. `version` sits right-aligned and dim
+/// `width`; empty for `Search`. `version` sits right-aligned and dim
 /// on the art's last row (the icon's status line carries it instead).
 pub fn render(theme: &Theme, style: Style, width: isize, version: &str, worktrees: usize, agents: usize) -> Vec<String> {
     let Some(art) = style.art() else { return Vec::new() };
@@ -200,47 +221,61 @@ pub fn render(theme: &Theme, style: Style, width: isize, version: &str, worktree
     rows.iter().map(|row| pad(row, width)).collect()
 }
 
-// -- art, generated from the brand grids --------------------------------------
-
-const PIXEL: Art = &[
-    ("▄    █▄▄ ▄▄▄ ▄▄▄ ▄█▄ ▄▄▄ ▄▄▄ ▄▄▄ ▄▄▄", "a    hhh hhh hhh ttt ttt ttt ttt ttt", ""),
-    (" ▀▄  █ █ █▄█ █    █  █   █▄█ █▄█ █▄▄", " aa  h h hhh h    t  t   ttt ttt ttt", ""),
-    ("▄▀   █ █ █▄▄ █    █▄ █   █▄▄ █▄▄ ▄▄█", "aa   h h hhh h    tt t   ttt ttt ttt", ""),
-];
-
-const PIXEL_SMALL: Art = &[
-    ("▄   █▄▄ ▄▄▄ ▄▄▄ ▄█▄ ▄▄▄ ▄▄▄ ▄▄▄  ▄▄", "a   hhh hhh hhh ttt ttt ttt ttt  tt", ""),
-    ("▄▀  █ █ ██▄ █    █▄ █   ██▄ ██▄ ▄█ ", "aa  h h hhh h    tt t   ttt ttt tt ", ""),
-];
+// -- art, generated from the brand grids (the icon from icon-16.png) ---------
 
 const BRAILLE: Art = &[
     ("⡀ ⣆⣀⢀⣀⡀⣀⡀⣠⡀⣀⡀⣀⣀⢀⣀⡀⣀⣀", "a hhhhhhhttttttttttt", ""),
     ("⡨⠂⡇⢸⢸⣒⡃⡇ ⢸⡀⡇ ⣗⣚⢸⣒⡃⣓⣲", "aahhhhhh ttt ttttttt", ""),
 ];
 
-const SEXTANT: Art = &[
-    ("🬢 🬛🬓🬚🬓🬚🬃🬫🬃🬚🬃🬚🬓🬚🬓🬚🬃", "a hhhhhhtttttttttt", ""),
-    ("🬖🬀▌▌🬴🬐▌ ▐🬏▌ 🬴🬐🬴🬐🬰▌", "aahhhhh ttt tttttt", ""),
-];
-
 const ICON: Art = &[
-    ("          ▄▄▄▄  ", "          wwww  ", ""),
-    ("  ▄▄▄▄▄   █ ▄█▄ ", "  aaaaa   m www ", ""),
-    (" █▀▀▀▀▀█  █ ███ ", " aaaaaaa  m www ", "   w w          "),
-    (" █▄▄▄▄▄█  █     ", " aaaaaaa  m     ", ""),
-    (" █▀▀▀▀▀█ ▄█ ██▀█", " aaaaaaa wm tttt", "  wwwww       w "),
-    (" ███████  █ ▀███", " aaaaaaa  m tttt", ""),
-    ("  ▀   ▀   █  ██ ", "  m   m   m  mm ", ""),
-    ("████▀████▀▀▀██▀▀", "uuuummmmmwwwmmmm", "    u    mmm  uu"),
+    ("          ▄▄▄▄  ", "          AAAA  ", ""),
+    ("  ▄▄▄▄▄   █ ▄█▄ ", "  DBBBL   O AAA ", ""),
+    (" █▀▀▀▀▀█  █ █▀█ ", " DBBBBBL  O ACA ", "   C C       A  "),
+    (" █▄▄▄▄▄█  █     ", " DBBBBBL  O     ", ""),
+    (" █▀▀▀▀▀█ ▄█ ██▀▀", " DBBBBBL CO YGGG", "  AAAAA       AF"),
+    (" ███████  █ ▀▀██", " DBBBBBL  O YGFF", "             F  "),
+    ("  ▀   ▀   █  ██ ", "  R   R   O  OR ", ""),
+    ("████▀█▀▀▀▀▀▀▀▀▀▀", "PPPPRROOOAAAOORR", "    P RRROOORRPP"),
 ];
 
+/// The 32×32 mark (`branding/logo/mark/mark.svg`), pixel for pixel
+/// in the brand palette; the popup's empty states draw it.
+pub const MARK: Art = &[
+    ("                     ▄▄▄ ▄▄▄▄▀▄▄", "                     YGG GFFFTGT", "                             V  "),
+    ("              █▀▀█▄▄█▀█████████▀", "              AAAARRYGGGGGFFFFFT", "               RR    Y         F"),
+    ("              █▀█▀█▀▀█▀▀▀██▀▀▀▀▄", "              ARAAARRYYYGGFFGGFF", "               O C OY  TA  G  G "),
+    ("    ▄█▀▀▀▀█▄  ███▀███▀▄ ▀██  ▄▀ ", "    DDDDBBBB  AOACAORAA TAR  OO ", "                 A              "),
+    ("    █ ▀  ▀ █  ██▀▀▀█▀  ▀▄▀█▄▀   ", "    D C  C B  AROOORR  AAARRO   ", "                RRR      O      "),
+    ("    ██▄▄▄▄██  █          ▀█     ", "    DDDDDDBB  A          AR     ", "                         O      "),
+    ("    ███████▀  █          ██▀▀▄▀▀", "    DDDDDDDB  A          ORGGGFF", "           D               FF TT"),
+    ("    ▀▀▀▀▀▀▀▀  ▀          ██▀▀█▀▀", "    AAAAAAAA  A          ORFFRTT", "    DDDDDDDD  O             T   "),
+    ("    ████████  ▀          ██▀▀█  ", "    DDDDDDDD  C          ORTYR  ", "              O             T   "),
+    ("    ████████  █          ██  █  ", "    DDDDDDDD  O          RR  R  ", ""),
+    ("    ████████  █          ██  █  ", "    DDDDDDDD  R          RR  R  ", ""),
+    ("     ▀▀▀▀▀▀   █          ██  █  ", "     DDDDDD   R          RR  R  ", "     RR  RR                     "),
+    ("▀▀▀▀▄▄▄▄▄▄▄▄█▀▀▀▀▀▀▀▀▀▀▀▀▀▀     ", "PPPRRRRRRROOOARAAAAAAAOOOOP     ", "             OOOOOOOOOPPP       "),
+    ("███████▀▀▀▀█████████████▀▀▀▀████", "PPPPPPPRRRRRRRRRRRRRRRRRRRRRPPPP", "       PPPP             PPPP    "),
+];
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::textutil::{strip_ansi, visible_width};
 
-    const ART: [Style; 5] = [Style::Pixel, Style::PixelSmall, Style::Braille, Style::Sextant, Style::Icon];
+    #[test]
+    fn the_mark_rows_line_up() {
+        for (glyphs, fg, bg) in MARK {
+            assert_eq!((glyphs.chars().count(), fg.chars().count()), (32, 32));
+            assert!(bg.is_empty() || bg.chars().count() == 32);
+            assert!(fg.chars().chain(bg.chars()).all(|c| c == ' ' || brand(c).is_some()));
+            for (glyph, code) in glyphs.chars().zip(fg.chars()) {
+                assert_eq!(glyph == ' ', code == ' ');
+            }
+        }
+    }
+
+    const ART: [Style; 2] = [Style::Braille, Style::Icon];
 
     #[test]
     fn names_round_trip_and_next_visits_every_style_once() {
@@ -263,7 +298,7 @@ mod tests {
                 assert_eq!(glyphs.chars().count(), width);
                 assert_eq!(fg.chars().count(), width, "{style:?}");
                 assert!(bg.is_empty() || bg.chars().count() == width, "{style:?}");
-                assert!(fg.chars().chain(bg.chars()).all(|c| c == ' ' || !role(c).is_empty()));
+                assert!(fg.chars().chain(bg.chars()).all(|c| c == ' ' || !role(c).is_empty() || brand(c).is_some()));
                 // A drawn cell always has a colour; a blank cell never does.
                 for (glyph, code) in glyphs.chars().zip(fg.chars()) {
                     assert_eq!(glyph == ' ', code == ' ', "{style:?} {glyphs:?}");
@@ -275,7 +310,7 @@ mod tests {
     #[test]
     fn each_style_draws_its_rows_at_full_width() {
         let theme = Theme::new(None, None, None);
-        let expected = [(Style::Pixel, 3), (Style::PixelSmall, 2), (Style::Braille, 2), (Style::Sextant, 2), (Style::Icon, 9)];
+        let expected = [(Style::Braille, 2), (Style::Icon, 9)];
         for (style, count) in expected {
             let rows = render(&theme, style, 100, "1.2.3", 3, 1);
             assert_eq!(rows.len(), count, "{style:?}");
@@ -293,12 +328,13 @@ mod tests {
                 assert!(plain[3].contains("every worktree, every agent,") && plain[4].contains("one popup."));
                 assert!(plain[6].contains("v1.2.3 · 3 worktrees · 1 agent"), "{:?}", plain[6]);
                 assert!(plain[8].trim().is_empty());
-                assert!(joined.contains(&theme.bg("working")), "the lantern's two-colour cells use a background");
+                assert!(joined.contains("\x1b[48;2;247;231;166m"), "the eyes are cream under the cloak's half cells");
             } else {
                 assert!(plain.last().unwrap().ends_with("v1.2.3"), "{style:?}");
             }
         }
-        for style in [Style::Search, Style::Off] {
+        {
+            let style = Style::Search;
             assert!(render(&theme, style, 100, "1.2.3", 3, 1).is_empty());
             assert_eq!(style.rows(), 0);
         }
@@ -307,8 +343,8 @@ mod tests {
     #[test]
     fn the_version_is_left_out_when_it_would_touch_the_art() {
         let theme = Theme::new(None, None, None);
-        let width = Style::Pixel.min_width();
-        let rows = render(&theme, Style::Pixel, width, "1.2.3", 0, 0);
+        let width = Style::Braille.min_width();
+        let rows = render(&theme, Style::Braille, width, "1.2.3", 0, 0);
         assert!(rows.iter().all(|row| visible_width(row) as isize == width));
         assert!(!strip_ansi(rows.last().unwrap()).contains("v1.2.3"));
     }
@@ -323,9 +359,7 @@ mod tests {
             assert_eq!(style.resolve(style.min_width() - 1, tall), Style::Search, "{style:?}: narrow");
         }
         assert_eq!(Style::Icon.min_width(), 46);
-        assert_eq!(Style::Pixel.min_width(), 36);
-        for style in [Style::Search, Style::Off] {
-            assert_eq!(style.resolve(1, 1), style);
-        }
+        assert_eq!(Style::Braille.min_width(), 20);
+        assert_eq!(Style::Search.resolve(1, 1), Style::Search);
     }
 }

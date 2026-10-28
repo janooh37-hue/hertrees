@@ -36,7 +36,7 @@ to this project; use it to link to or write about Hertrees.
 | `social/social.png` | GitHub Settings → Social preview (uploaded by hand; the repo is public) |
 | `favicon/` | any future docs site or GitHub Pages |
 | `terminal/mark.ansi` | `hertrees --version` on a terminal; `mark.txt` with `NO_COLOR`. Piped output stays one line |
-| `terminal/mark.txt` | the popup's "not a git project" and "no worktrees" states, in theme colours, when the popup is tall enough |
+| `terminal/mark.txt` | `hertrees --version` with `NO_COLOR`; the popup's empty states draw the mark from `src/wordmark.rs::MARK` in brand colours |
 | `palette.svg` | this guide. The popup's defaults in `src/theme.rs` are ANSI colours so it follows the terminal's theme; the roles line up (leaf: idle and merged, cloak blue: accent and open, amber: working and draft, red: blocked and closed), and these hex values can be set under `colors` in the config |
 
 ## Colour

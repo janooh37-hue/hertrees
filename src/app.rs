@@ -3037,7 +3037,7 @@ mod tests {
         let mut env = EnvVars::new();
         let mut picker = preset_picker(tmp.path(), &mut env);
         picker.mode = Mode::List;
-        for style in [Style::Pixel, Style::PixelSmall, Style::Braille, Style::Sextant, Style::Icon] {
+        for style in [Style::Braille, Style::Icon] {
             picker.config.wordmark = style;
             let rows = plain(&mut picker, 100, 30);
             let header = style.rows() as usize;
@@ -3057,8 +3057,6 @@ mod tests {
             assert!(narrow[0].starts_with(" ❯ "), "{style:?}: {:?}", narrow[0]);
             assert!(!narrow[0].contains("hertrees") && !narrow[0].contains('▀'));
         }
-        picker.config.wordmark = Style::Off;
-        assert!(plain(&mut picker, 100, 30)[0].starts_with(" ❯  search worktrees"));
         picker.config.wordmark = Style::Search;
         assert!(plain(&mut picker, 100, 30)[0].starts_with(" ❯ hertrees │ "));
     }
@@ -3072,21 +3070,21 @@ mod tests {
         picker.mode = Mode::List;
         plain(&mut picker, 100, 30);
         key(&mut picker, "ctrl+l");
-        assert_eq!(picker.config.wordmark, Style::Pixel);
-        assert_eq!(picker.status.as_ref().unwrap().0, "wordmark: pixel");
-        assert_eq!(Config::load().wordmark, Style::Pixel);
-        assert!(plain(&mut picker, 100, 30)[0].contains('█'), "drawn without reopening the popup");
+        assert_eq!(picker.config.wordmark, Style::Braille);
+        assert_eq!(picker.status.as_ref().unwrap().0, "wordmark: braille");
+        assert_eq!(Config::load().wordmark, Style::Braille);
+        assert!(plain(&mut picker, 100, 30)[0].contains('⣀'), "drawn without reopening the popup");
         // A popup too small for the art says so, and still saves the choice.
         plain(&mut picker, 100, 8);
         key(&mut picker, "ctrl+l");
-        assert_eq!(picker.status.as_ref().unwrap().0, "wordmark: pixel-small (needs a larger popup)");
+        assert_eq!(picker.status.as_ref().unwrap().0, "wordmark: icon (needs a larger popup)");
         for _ in 2..wordmark::NAMES.len() {
             key(&mut picker, "ctrl+l");
         }
         assert_eq!((picker.config.wordmark, Config::load().wordmark), (Style::Search, Style::Search));
         std::fs::write(tmp.path().join("config.json"), "{broken").unwrap();
         key(&mut picker, "ctrl+l");
-        assert_eq!(picker.config.wordmark, Style::Pixel);
+        assert_eq!(picker.config.wordmark, Style::Braille);
         assert_eq!(picker.status.as_ref().unwrap().1, "blocked");
         assert_eq!(std::fs::read_to_string(tmp.path().join("config.json")).unwrap(), "{broken");
     }

@@ -555,34 +555,16 @@ pub fn mark_rows(art: &str, blank: impl Fn(&str) -> bool) -> Vec<&str> {
     rows[start..end].to_vec()
 }
 
-/// The plain mark, centered in `width`, or nothing when it does not fit: the
-/// shepherd in the accent colour, the lantern amber, the tree green, the
-/// ground muted. Theme roles, so it follows the configured colours.
+/// The mark in its brand colours, centered in `width`, or nothing when it
+/// does not fit.
 pub fn render_mark(theme: &Theme, width: isize) -> Vec<String> {
-    let rows = mark_rows(MARK, |row| row.trim().is_empty());
-    let mark_width = rows.iter().map(|row| display_width(row)).max().unwrap_or(0) as isize;
+    let art = crate::wordmark::MARK;
+    let mark_width = art.iter().map(|row| display_width(row.0)).max().unwrap_or(0) as isize;
     if mark_width > width {
         return Vec::new();
     }
     let left = " ".repeat(((width - mark_width) / 2) as usize);
-    let last = rows.len().saturating_sub(1);
-    rows.iter().enumerate().map(|(index, row)| {
-        let mut segments: Vec<Segment> = Vec::new();
-        for (column, ch) in row.chars().enumerate() {
-            let role = match (ch, column) {
-                (' ', _) => "",
-                _ if index == last => "muted",
-                (_, 0..=12) => "accent",
-                (_, 13..=19) => "working",
-                _ => "idle",
-            };
-            match segments.last_mut() {
-                Some(segment) if segment.role == role => segment.text.push(ch),
-                _ => segments.push(Segment::new(role, ch.to_string())),
-            }
-        }
-        pad(&format!("{}{}", left, segments_to_text(theme, &segments, "")), width)
-    }).collect()
+    art.iter().map(|&row| pad(&format!("{}{}", left, crate::wordmark::paint_art_row(theme, row)), width)).collect()
 }
 
 pub fn render_empty_state(theme: &Theme, width: isize, lines: &[(&str, &'static str, bool)], filter: &str) -> Vec<String> {
@@ -700,7 +682,7 @@ mod tests {
         assert!(mark_rows(" \n", |r| r.trim().is_empty()).is_empty());
         let theme = Theme::new(None, None, None);
         let mark = render_mark(&theme, 40);
-        assert_eq!(mark.len(), mark_rows(MARK, |r| r.trim().is_empty()).len());
+        assert_eq!(mark.len(), crate::wordmark::MARK.len());
         assert!(mark.iter().all(|row| visible_width(row) == 40));
         assert!(!strip_ansi(&mark[0]).trim().is_empty());
         assert!(render_mark(&theme, 31).is_empty());
