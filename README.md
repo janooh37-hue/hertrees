@@ -25,8 +25,9 @@ any of them or in a brand-new worktree.
 ## Quick start
 
 Needs Herdr 0.9.3+ on Linux, macOS or Windows, `git`, and an authenticated `gh` for PR
-state (optional). Herdr builds the plugin from source on install, so Rust 1.88+ is
-required ([rustup](https://rustup.rs); on Windows with the MSVC toolchain).
+state (optional). Install downloads the prebuilt binary for your machine (x86_64 or
+aarch64) from the GitHub release; without one it builds from source, which needs Rust
+1.88+ ([rustup](https://rustup.rs); on Windows with the MSVC toolchain).
 
 1. Install:
 
@@ -128,8 +129,8 @@ Everything is optional. Edit `~/.config/herdr/plugins/config/hertrees/config.jso
 ```
 
 - `agents`: agent kinds offered, in order. Default: every supported agent found on `PATH`.
-- `wordmark`: `"search"` (default, `❯ hertrees │` on the search line), `"pixel"`,
-  `"pixel-small"`, `"braille"`, `"sextant"` or `"icon"` (pixel lettering above it), or `"off"`.
+- `wordmark`: `"search"` (default, `❯ hertrees │` on the search line), `"braille"` (lettering
+  above it) or `"icon"` (icon, name, tagline and counts above it).
   `^l` in the popup steps through them and saves the choice here.
 - `icons`: glyphs before worktree, space and tab rows. `"auto"` (default) uses Nerd Font
   glyphs when a Nerd Font is installed and `⎇ ◫ ▭` otherwise; `"nerd"` or `"unicode"`
@@ -180,7 +181,7 @@ Scripts and agents can start, prompt and clean up sessions headlessly; see
 
 ```bash
 mise exec -- cargo test --release
-sh scripts/install.sh                     # release build into bin/hertrees
+sh scripts/install.sh                     # bin/hertrees: release binary, or a build of local changes
 bash scripts/e2e.sh --help                # disposable live Herdr/Claude test
 ```
 

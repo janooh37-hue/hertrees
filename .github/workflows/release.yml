@@ -1,0 +1,235 @@
+name: release
+
+# Builds the hertrees binary for every platform the plugin supports and
+# attaches them to the GitHub release for the tag, so `herdr plugin install`
+# downloads one instead of compiling (scripts/install.sh, scripts/install.ps1).
+#
+# Asset names are a contract with the downloaders, do not change them:
+#   hertrees-<os>-<arch>[.exe]   os in {linux, macos, windows},
+#                                arch in {x86_64, aarch64}
+#   SHA256SUMS                   "<sha256>  <asset name>" per binary
+
+on:
+  push:
+    tags: ["v*"]
+    branches: [main]
+  # Pull requests and main build every asset but publish nothing, so a broken
+  # target shows up before the tag does.
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and attach binaries to (e.g. v0.2.7)"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+env:
+  TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  RELEASING: ${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
+
+jobs:
+  # The downloader fetches v<manifest version>, so a tag that disagrees with
+  # either version source would publish binaries nobody can install.
+  versions:
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ env.TAG }}
+          persist-credentials: false
+      - name: Tag matches every version source
+        run: |
+          grab() { sed -n -E 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' "$1" | head -n 1; }
+          plugin="v$(grab herdr-plugin.toml)"
+          cargo="v$(grab Cargo.toml)"
+          printf '%-20s %s\n' tag "$TAG" herdr-plugin.toml "$plugin" Cargo.toml "$cargo"
+          for found in "$plugin" "$cargo"; do
+            if [ "$found" != "$TAG" ]; then
+              echo "version mismatch: the tag and every version source must agree" >&2
+              exit 1
+            fi
+          done
+
+  build:
+    needs: versions
+    # Run when versions passed, or when it was skipped because nothing is released.
+    if: ${{ !cancelled() && (needs.versions.result == 'success' || needs.versions.result == 'skipped') }}
+    name: build ${{ matrix.asset }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # musl targets link statically with Rust's bundled musl; the only
+          # dependency is the libc crate, so no C toolchain for musl is needed.
+          # Each one builds natively on a runner of its own architecture.
+          # `native`: the runner's installer picks this asset and can run it.
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+            asset: hertrees-linux-x86_64
+            native: true
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+            asset: hertrees-linux-aarch64
+            native: true
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+            asset: hertrees-macos-x86_64
+            native: false
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            asset: hertrees-macos-aarch64
+            native: true
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            asset: hertrees-windows-x86_64.exe
+            native: true
+          - target: aarch64-pc-windows-msvc
+            runner: windows-latest
+            asset: hertrees-windows-aarch64.exe
+            native: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ env.RELEASING == 'true' && env.TAG || github.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: 1.99.1
+          targets: ${{ matrix.target }}
+      - name: Build
+        # bash on every runner: Windows defaults to PowerShell, where "$TARGET"
+        # is an empty PowerShell variable rather than the environment variable.
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cargo build --release --locked --target "$TARGET"
+      # Staged outside the checkout: the installers build from source when the
+      # checkout has untracked files.
+      - name: Stage asset
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          ASSET: ${{ matrix.asset }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/dist"
+          suffix=""
+          case "$TARGET" in *windows*) suffix=".exe" ;; esac
+          cp "target/$TARGET/release/hertrees${suffix}" "$RUNNER_TEMP/dist/$ASSET"
+          ls -l "$RUNNER_TEMP/dist"
+      - name: Check static linkage
+        if: contains(matrix.target, 'linux-musl')
+        env:
+          ASSET: ${{ matrix.asset }}
+        run: |
+          file "$RUNNER_TEMP/dist/$ASSET"
+          file "$RUNNER_TEMP/dist/$ASSET" | grep -Eq 'statically linked|static-pie linked'
+      # The installer this runner's users get must pick, verify and install the
+      # asset by download, not fall back to cargo.
+      - name: Checksum for the installer check
+        if: matrix.native
+        shell: bash
+        env:
+          ASSET: ${{ matrix.asset }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/download"
+          cp "$RUNNER_TEMP/dist/$ASSET" "$RUNNER_TEMP/download/"
+          cd "$RUNNER_TEMP/download"
+          if command -v sha256sum >/dev/null; then sha256sum "$ASSET"; else shasum -a 256 "$ASSET"; fi > SHA256SUMS
+          cat SHA256SUMS
+      - name: install.sh installs the asset
+        if: matrix.native && !contains(matrix.target, 'windows')
+        shell: bash
+        run: |
+          HERTREES_DOWNLOAD_BASE="file://$RUNNER_TEMP/download" sh scripts/install.sh 2>&1 | tee "$RUNNER_TEMP/install.log"
+          grep -q 'downloading' "$RUNNER_TEMP/install.log"
+          if grep -q 'building from source' "$RUNNER_TEMP/install.log"; then exit 1; fi
+          bin/hertrees --version
+      - name: install.ps1 installs the asset
+        if: matrix.native && contains(matrix.target, 'windows')
+        # Windows PowerShell 5.1, as Herdr's build step runs it.
+        shell: powershell
+        run: |
+          $env:HERTREES_DOWNLOAD_BASE = ([Uri](Join-Path $env:RUNNER_TEMP 'download')).AbsoluteUri
+          $Log = Join-Path $env:RUNNER_TEMP 'install.log'
+          $Out = Join-Path $env:RUNNER_TEMP 'install.out'
+          $P = Start-Process powershell -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'scripts\install.ps1' `
+            -RedirectStandardError $Log -RedirectStandardOutput $Out -NoNewWindow -Wait -PassThru
+          Get-Content -LiteralPath $Log
+          if ($P.ExitCode -ne 0) { throw "install.ps1 exited $($P.ExitCode)" }
+          $Text = Get-Content -Raw -LiteralPath $Log
+          if ($Text -notmatch 'downloading' -or $Text -match 'building from source') { throw 'install.ps1 did not install the download' }
+          & bin\hertrees.exe --version
+          if (-not (Test-Path -LiteralPath bin\hertrees)) { throw 'no extensionless bin\hertrees' }
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ runner.temp }}/dist/${{ matrix.asset }}
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ env.TAG }}
+          persist-credentials: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: |
+          expected="hertrees-linux-x86_64 hertrees-linux-aarch64 hertrees-macos-x86_64 hertrees-macos-aarch64 hertrees-windows-x86_64.exe hertrees-windows-aarch64.exe"
+          for name in $expected; do
+            test -f "$name" || { echo "missing $name"; exit 1; }
+          done
+          sha256sum $expected > SHA256SUMS
+          cat SHA256SUMS
+      # The release notes are the tag's CHANGELOG.md section.
+      - name: Release notes
+        run: |
+          version="${TAG#v}"
+          awk -v v="$version" '
+            index($0, "## " v " ") == 1 || $0 == "## " v { on = 1; next }
+            on && /^## / { exit }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          if ! grep -q '[^[:space:]]' notes.md; then
+            echo "CHANGELOG.md has no section for $version" >&2
+            exit 1
+          fi
+          cat notes.md
+      # Draft first, upload everything, then publish, so nobody downloads a
+      # half-filled release. A published release's assets are never replaced;
+      # a draft left by a failed run is refilled.
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [ "$draft" != true ]; then
+              echo "release $TAG is already published; refusing to replace its assets" >&2
+              exit 1
+            fi
+          else
+            gh release create "$TAG" --verify-tag --draft --title "Hertrees ${TAG#v}" --notes-file notes.md
+          fi
+          gh release upload "$TAG" dist/* --clobber
+          gh release edit "$TAG" --draft=false
