@@ -1,6 +1,8 @@
-//! Optional Herdr Agent Icons Max vendor marks, compatible with herdr-radar.
+//! Optional Herdr Agent Icons Max vendor marks, compatible with herdr-radar,
+//! and Nerd Font marks for the rows the font has none for.
 //!
-//! Codepoints: https://github.com/hhdebb/herdr-radar/blob/main/tools/codepoints.toml
+//! Codepoints (font 1.8.0, herdr-radar v1.5.0):
+//! https://github.com/hhdebb/herdr-radar/blob/v1.5.0/tools/codepoints.toml
 //! The popup never installs fonts or changes terminal configuration.
 
 use crate::pyjson::Value;
@@ -15,7 +17,7 @@ pub const FAMILY: &str = "Herdr Agent Icons Max";
 pub const VENDORS: &[&str] = &[
     "claude", "codex", "opencode", "omp", "cline", "mastracode", "kimi", "kilo", "maki", "pi",
     "hermes", "cursor", "copilot", "deepseek", "gemini", "gpt", "qwen", "grok", "agy", "kiro",
-    "amp", "devin", "qodercli", "glm",
+    "amp", "devin", "qodercli", "glm", "kimchi", "muse", "crush",
 ];
 
 pub fn logo(index: usize) -> char {
@@ -195,6 +197,25 @@ pub fn logo_for(agent: Option<&str>) -> Option<char> {
     VENDORS.iter().position(|v| *v == kind).map(logo)
 }
 
+/// Nerd Font: terminal, duck (yazi's mascot), robot.
+const NERD_SHELL: char = '\u{f489}';
+const NERD_YAZI: char = '\u{f01e5}';
+const NERD_AGENT: char = '\u{f06a9}';
+
+/// The mark before an agent picker or agent row: the vendor logo when the
+/// font has one, else (with a Nerd Font) a terminal for `shell`, a duck for
+/// `yazi` and a robot for any other agent, so new kinds line up with the rest.
+pub fn mark_for(agent: Option<&str>, nerd: bool) -> Option<char> {
+    let agent = agent.filter(|a| !a.trim().is_empty())?;
+    logo_for(Some(agent)).or_else(|| {
+        nerd.then(|| match agent_kind(agent).as_str() {
+            "shell" => NERD_SHELL,
+            "yazi" => NERD_YAZI,
+            _ => NERD_AGENT,
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,5 +260,20 @@ mod tests {
         assert_eq!(logo_for(Some("codex:model")), logo_for(Some("codex")));
         assert_eq!(logo_for(Some("unrecognised")), None);
         assert_eq!(logo_for(None), None);
+        assert_eq!(logo_for(Some("muse")), Some('\u{e1b9}'));
+        assert_eq!(logo_for(Some("crush")), Some('\u{e1ba}'));
+    }
+
+    #[test]
+    fn nerd_marks_fill_in_where_the_font_has_no_logo() {
+        assert_eq!(mark_for(Some("claude"), true), logo_for(Some("claude")), "a vendor logo wins");
+        assert_eq!(mark_for(Some("shell"), true), Some(NERD_SHELL));
+        assert_eq!(mark_for(Some("yazi"), true), Some(NERD_YAZI));
+        assert_eq!(mark_for(Some("droid"), true), Some(NERD_AGENT), "kinds without a logo get the robot");
+        assert_eq!(mark_for(Some("yazi"), false), None, "no Nerd Font, no fallback");
+        assert_eq!(mark_for(None, true), None);
+        for mark in [NERD_SHELL, NERD_YAZI, NERD_AGENT] {
+            assert_eq!(crate::textutil::display_width(&mark.to_string()), 1, "{mark:?}");
+        }
     }
 }

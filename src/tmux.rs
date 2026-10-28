@@ -336,6 +336,11 @@ impl Mux for Tmux {
         tmux(&["set-option", "-p", "-t", tab, LABEL, &literal(label)]).map(|_| ())
     }
 
+    fn run(&mut self, pane: &str, command: &str) -> Result<(), String> {
+        tmux(&["send-keys", "-t", pane, "-l", &literal(command)])?;
+        tmux(&["send-keys", "-t", pane, "Enter"]).map(|_| ())
+    }
+
     fn close_space(&mut self, space: &str) -> Result<(), String> {
         tmux(&["kill-window", "-t", space]).map(|_| ())
     }

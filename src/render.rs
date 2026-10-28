@@ -239,6 +239,7 @@ pub fn agent_role(agent: Option<&str>) -> &'static str {
         "gemini" => "agent_gemini",
         "cursor" | "cursor-agent" => "agent_cursor",
         "opencode" | "open-code" => "agent_opencode",
+        "yazi" => "agent_yazi",
         _ => "muted",
     }
 }
@@ -281,7 +282,7 @@ pub fn render_row(theme: &Theme, item: &Item, row: &Row, width: isize, selected:
     let glyph_role = status_role(&item.status);
     let glyph = (!item.status.is_empty())
         .then(|| Segment::new(glyph_role, format!("{} ", crate::theme::status_glyph(&item.status))));
-    let logo = if theme.agent_icons { icons::logo_for(item.agent.as_deref()) } else { None };
+    let logo = if theme.agent_icons { icons::mark_for(item.agent.as_deref(), theme.tree_icons == Some(icons::NERD)) } else { None };
     let mut leading = vec![marker];
     if item.indent > 0 {
         leading.push(Segment::new("unknown", "  ".repeat(item.indent)));
@@ -290,7 +291,10 @@ pub fn render_row(theme: &Theme, item: &Item, row: &Row, width: isize, selected:
         leading.push(Segment::new(role, format!("{} ", icon)));
     }
     if let Some(logo) = logo {
-        leading.push(Segment::new(agent_role(item.agent.as_deref()), format!("{}  ", logo)));
+        // Logos take one column and the duck emoji two; either way the title starts 3 columns on.
+        let logo = logo.to_string();
+        let gap = if display_width(&logo) > 1 { " " } else { "  " };
+        leading.push(Segment::new(agent_role(item.agent.as_deref()), format!("{logo}{gap}")));
     }
     leading.extend(glyph);
 
