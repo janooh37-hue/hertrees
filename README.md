@@ -186,9 +186,8 @@ Everything is optional. Edit `~/.config/herdr/plugins/config/hertrees/config.jso
     https://raw.githubusercontent.com/hhdebb/herdr-radar/v1.5.0/dist/HerdrAgentIconsMax-Regular.ttf
   ```
 
-  With a Nerd Font as well, the rows the font has no logo for get a Nerd Font mark
-  instead: a terminal for `shell`, a folder for `yazi`, and a robot for any other agent
-  (`droid`, `letta`, and kinds Herdr adds later).
+  `yazi` gets its duck (🦆), and with a Nerd Font as well, an agent the font has no logo
+  for gets a robot (`droid`, `letta`, and kinds Herdr adds later).
 
   Hertrees detects the logo font in your user or system font folder. Set `"agent_icons": "font"` when
   the font is only installed on the machine running your terminal. When Herdr runs on

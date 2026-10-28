@@ -290,7 +290,10 @@ pub fn render_row(theme: &Theme, item: &Item, row: &Row, width: isize, selected:
         leading.push(Segment::new(role, format!("{} ", icon)));
     }
     if let Some(logo) = logo {
-        leading.push(Segment::new(agent_role(item.agent.as_deref()), format!("{}  ", logo)));
+        // Logos take one column and the duck emoji two; either way the title starts 3 columns on.
+        let logo = logo.to_string();
+        let gap = if display_width(&logo) > 1 { " " } else { "  " };
+        leading.push(Segment::new(agent_role(item.agent.as_deref()), format!("{logo}{gap}")));
     }
     leading.extend(glyph);
 
