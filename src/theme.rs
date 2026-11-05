@@ -53,6 +53,7 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("agent_gemini", "#4285F4"),
     ("agent_cursor", "#A78BFA"),
     ("agent_opencode", "#38BDF8"),
+    ("agent_yazi", "#F5D84E"),
     // PR states reuse the lifecycle palette: idle-green, accent, working-amber, blocked-red.
     ("pr_merged", "bright_green"),
     ("pr_open", "bright_blue"),

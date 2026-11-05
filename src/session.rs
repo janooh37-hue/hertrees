@@ -5,6 +5,24 @@ use crate::mux::{Mux, Started};
 // Herdr's supported kinds, the most used first: the agent picker's default order.
 const KINDS: &[&str] = &["claude", "codex", "omp", "opencode", "pi", "gemini", "cursor", "copilot", "amp", "grok", "kimi", "qwen", "devin", "agy", "cline", "mastracode", "kiro", "droid", "hermes", "kilo", "qodercli", "letta", "maki", "muse"];
 
+/// Pseudo agent kind: a new tab, or a new worktree, with only a shell.
+pub const SHELL: &str = "shell";
+/// Pseudo agent kind: a shell running the yazi file manager, offered when installed.
+pub const YAZI: &str = "yazi";
+
+/// A shell rather than an agent: no prompt, no preset.
+pub fn is_shell(kind: &str) -> bool {
+    kind == SHELL || kind == YAZI
+}
+
+/// Start yazi in a fresh shell pane; quitting it leaves the shell.
+pub fn shell_command(mux: &mut dyn Mux, kind: &str, started: Started) -> Result<Started, String> {
+    if kind == YAZI {
+        mux.run(&started.pane_id, YAZI)?;
+    }
+    Ok(started)
+}
+
 /// Supported, executable agents in configuration order (or the order of `KINDS`).
 pub fn installed_agents(preferred: &[String]) -> Vec<String> {
     let candidates: Vec<&str> = if preferred.is_empty() { KINDS.to_vec() } else { preferred.iter().map(String::as_str).collect() };

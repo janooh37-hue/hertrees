@@ -17,7 +17,7 @@ any of them or in a brand-new worktree. It also runs under plain [tmux](#tmux-be
 - **PR state per worktree:** `✓ merged`, `◉ open`, `◐ draft`, `● closed`, `no PR`, or `○ PR ?` when it could not check. `#N` is a clickable link.
 - **Agents:** the left glyph is Herdr's status for the agents in that checkout (`◉` needs you, `◐` working, `●` done, `✓` idle).
 - **Spaces and tabs:** each worktree's Herdr space and its tabs sit under it in the list (`⎇` worktree, `◫` space, `▭` tab; Nerd Font glyphs when you have one). Name the space when you create the worktree, rename spaces and tabs with `alt+r`, open a tab with `⏎`.
-- **New sessions:** start an agent in a worktree, or create a worktree and start one, with a preset first prompt (`blank`, `plan`, `research`, your own, or `custom`). `^t` opens a new tab with an agent or a plain shell.
+- **New sessions:** start an agent in a worktree, or create a worktree and start one, with a preset first prompt (`blank`, `plan`, `research`, your own, or `custom`). `^t` opens a new tab with an agent, a plain shell, or [yazi](https://yazi-rs.github.io) to browse its files when it is installed.
 - **Send to an agent:** `^s` on a tab sends a preset or your own prompt straight to the agent in it.
 - **Clean up:** `alt+d` removes a finished worktree: its space, its checkout, and its branch once GitHub merged it. `alt+⇧d` cleans up every merged one. Nothing with uncommitted changes or a working agent is touched. Agents and scripts use `hertrees clean`.
 - **Local facts:** dirty files `±N`, ahead/behind `↑↓`, last commit age, recent commits, and in the preview what the branch changed against `main`: commits both ways and the files with their `+`/`−` lines.
@@ -94,9 +94,9 @@ nested, set `HERTREES_MUX=tmux` (or `herdr`) to choose.
 | type | fuzzy search: branch, path, `#123`, PR title, PR state, agent |
 | `↑↓` `^p` `^n` `^k` `^j` `PgUp` `PgDn` | move |
 | `⏎` / click selected row | focus the worktree's space (opening it if needed), or the selected tab and its agent |
-| `^t` | new tab in the worktree's space: an agent with a preset, or a shell |
+| `^t` | new tab in the worktree's space: an agent with a preset, a shell, or yazi (when installed) |
 | `^s` | send a preset or prompt to a running agent; on a tab row, to that tab's agent |
-| `^x` | new worktree: branch name (`⇥` names its space) → agent (or shell) → preset |
+| `^x` | new worktree: branch name (`⇥` names its space) → agent (or shell, or yazi) → preset |
 | `→` `←` (empty query) | show or fold a worktree's space and tabs |
 | `alt+r` | rename the selected space or tab |
 | `alt+d` | clean up the selected worktree; on a space or tab row, close it |
@@ -171,21 +171,26 @@ Everything is optional. Edit `~/.config/herdr/plugins/config/hertrees/config.jso
 - Presets: see [Presets](#presets). The preset manager opens `$VISUAL`, then `$EDITOR`,
   then `nvim` or `vi`.
 - Fonts and icons: everything is plain Unicode by default. For vendor logos before agent
-  rows, install the optional "Herdr Agent Icons Max" font from
-  [herdr-radar](https://github.com/hhdebb/herdr-radar) (not bundled here because its marks
-  are third-party trademarks):
-  [**download HerdrAgentIconsMax-Regular.ttf**](https://raw.githubusercontent.com/hhdebb/herdr-radar/main/dist/HerdrAgentIconsMax-Regular.ttf).
+  rows, install the optional "Herdr Agent Icons Max" font (1.8.0, with marks for Muse,
+  Crush and Kimchi) from [herdr-radar v1.5.0](https://github.com/hhdebb/herdr-radar/releases/tag/v1.5.0)
+  (not bundled here because its marks are third-party trademarks):
+  [**download HerdrAgentIconsMax-Regular.ttf**](https://raw.githubusercontent.com/hhdebb/herdr-radar/v1.5.0/dist/HerdrAgentIconsMax-Regular.ttf).
+  An older copy of the font draws Muse as a box; replace it with this one.
 
   ```bash
   # Linux
   mkdir -p ~/.local/share/fonts && curl -fLo ~/.local/share/fonts/HerdrAgentIconsMax-Regular.ttf \
-    https://raw.githubusercontent.com/hhdebb/herdr-radar/main/dist/HerdrAgentIconsMax-Regular.ttf && fc-cache -f
+    https://raw.githubusercontent.com/hhdebb/herdr-radar/v1.5.0/dist/HerdrAgentIconsMax-Regular.ttf && fc-cache -f
   # macOS
   curl -fLo ~/Library/Fonts/HerdrAgentIconsMax-Regular.ttf \
-    https://raw.githubusercontent.com/hhdebb/herdr-radar/main/dist/HerdrAgentIconsMax-Regular.ttf
+    https://raw.githubusercontent.com/hhdebb/herdr-radar/v1.5.0/dist/HerdrAgentIconsMax-Regular.ttf
   ```
 
-  Hertrees detects it in your user or system font folder. Set `"agent_icons": "font"` when
+  With a Nerd Font as well, the rows the font has no logo for get a Nerd Font mark
+  instead: a terminal for `shell`, yazi's duck for `yazi`, and a robot for any other agent
+  (`droid`, `letta`, and kinds Herdr adds later).
+
+  Hertrees detects the logo font in your user or system font folder. Set `"agent_icons": "font"` when
   the font is only installed on the machine running your terminal. When Herdr runs on
   another machine (SSH, e.g. Termius on iOS), the font is detected on that server, so
   set `"agent_icons": "off"` if logos show as boxes.

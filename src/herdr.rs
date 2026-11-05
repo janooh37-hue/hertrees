@@ -183,6 +183,15 @@ impl Mux for HerdrClient {
         call(self, "tab.rename", dict(&[("tab_id", Value::str(tab)), ("label", Value::str(label))]), &["tab", "rename", tab, label]).map(|_| ())
     }
 
+    fn run(&mut self, pane: &str, command: &str) -> Result<(), String> {
+        let text = format!("{command}\r");
+        match call(self, "pane.send_text", dict(&[("pane_id", Value::str(pane)), ("text", Value::str(&text))]), &["pane", "send-text", pane, &text]) {
+            // `herdr pane send-text` prints nothing when it succeeds, JSON when it fails.
+            Err(error) if error.ends_with("produced no output") => Ok(()),
+            result => result.map(|_| ()),
+        }
+    }
+
     /// Herdr groups linked worktrees' spaces under the main checkout's and will
     /// not close that one alone.
     fn close_space(&mut self, space: &str) -> Result<(), String> {

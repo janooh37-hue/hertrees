@@ -41,6 +41,8 @@ pub trait Mux: Send {
     fn can_prompt(&self, kind: &str) -> Result<(), String>;
     /// Replace the shell in `started`'s pane with agent `kind`, named `started.agent`.
     fn launch(&mut self, started: Started, kind: &str, prompt: Option<&str>, progress: &mut dyn FnMut(&str)) -> Result<Started, String>;
+    /// Type `command` and Enter into the shell in `pane`; the shell stays when it exits.
+    fn run(&mut self, pane: &str, command: &str) -> Result<(), String>;
     /// Prompt a running agent (name or pane id); returns whether delivery was deferred.
     fn send_to(&mut self, agent: &str, prompt: &str) -> Result<bool, String>;
     fn rename_space(&mut self, space: &str, label: &str) -> Result<(), String>;

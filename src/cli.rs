@@ -37,7 +37,8 @@ options:
 subcommands:
   presets          print the preset directories and templates (yours and the repo's) as JSON
   start            start an installed agent in an existing or new worktree
-    --agent KIND   agent kind, or shell (a new tab, or a new worktree, with no agent)
+    --agent KIND   agent kind, shell (a new tab, or a new worktree, with no agent),
+                   or yazi (the same, browsing it in yazi)
     --label NAME   name the new worktree's space (default: the branch)
     --preset NAME  file preset or blank; custom requires --prompt
     --prompt TEXT  first prompt, or text added to --preset (at {input}, else below it)
@@ -273,7 +274,12 @@ fn print_presets() -> i32 {
 
 fn start(args: &[String]) -> Result<(), String> {
     let args = parse_start(args)?;
-    if args.agent != "shell" && session::installed_agents(std::slice::from_ref(&args.agent)).is_empty() {
+    let installed = match args.agent.as_str() {
+        session::SHELL => true,
+        session::YAZI => crate::opener::on_path(session::YAZI),
+        kind => !session::installed_agents(&[kind.to_owned()]).is_empty(),
+    };
+    if !installed {
         return Err(format!("unknown or uninstalled agent kind: {}", args.agent));
     }
     let mut mux = mux::from_env();
@@ -293,11 +299,12 @@ fn start(args: &[String]) -> Result<(), String> {
     let vars = session::prompt_vars(&project, wt, args.base.as_deref(), info.as_ref());
     let prompt = finish_prompt(&template, vars, &args.vars, checkout, pr_url)?;
     let prompt = if prompt.is_empty() { None } else { Some(prompt.as_str()) };
-    let started = if args.agent == "shell" {
-        match &args.branch {
+    let started = if session::is_shell(&args.agent) {
+        let started = match &args.branch {
             Some(branch) => session::create_shell(mux.as_mut(), &project, branch, args.base.as_deref(), args.label.as_deref())?,
             None => session::open_tab(mux.as_mut(), &project, wt, &mut |_| {})?,
-        }
+        };
+        session::shell_command(mux.as_mut(), &args.agent, started)?
     } else {
         let taken = mux.agents().into_iter().filter_map(|agent| agent.name).collect::<Vec<_>>();
         if let Some(branch) = &args.branch {
